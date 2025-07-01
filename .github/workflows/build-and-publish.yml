@@ -12,9 +12,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v3
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.0-dev.1911+3bf89f55c
+          version: 0.15.0-dev.885+e83776595
+      - name: Create out_dir
+        run: mkdir build
       - name: Build
         run: zig build site -- -p /goku
       - name: Publish

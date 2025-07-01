@@ -1,32 +1,32 @@
 .{
-    .name = "goku",
-    .version = "0.0.3",
+    .name = .goku,
+    .version = "0.0.9",
+    .fingerprint = 0x6258ab6458a3c4a3,
     .dependencies = .{
-        .clap = .{
-            .url = "git+https://github.com/Hejsil/zig-clap#560c8dd72ab25d556123846254040c5bf9ad3ba4",
-            .hash = "12200abadc141099ff2ba5098f7eca9bf84d548dd92ec5827ef323d813d59b049780",
+        .httpz = .{
+            .url = "git+https://github.com/karlseguin/http.zig?ref=dev#b1896f4b0bd30deb0351039b1ba470c9041f4117",
+            .hash = "httpz-0.0.0-PNVzrE-8BgCUEVpFtYaUOFrWMqXHBu95eyIYRkXbyriy",
         },
-        .@"custom-test-runner" = .{ .path = "./modules/custom-test-runner" },
+        .custom_test_runner = .{ .path = "./modules/custom-test-runner" },
         .bulma = .{ .path = "./modules/bulma" },
+        .htm = .{ .path = "./modules/htm" },
         .htmx = .{ .path = "./modules/htmx" },
         .lucide = .{ .path = "./modules/lucide" },
         .md4c = .{ .path = "./modules/md4c" },
         .mustach = .{ .path = "./modules/mustach" },
-        .quickjs = .{ .path = "./modules/quickjs" },
         .sqlite = .{
-            .url = "git+https://github.com/vrischmann/zig-sqlite#7d50331972777727d0a22f5e4a51e8a06c410bad",
-            .hash = "1220f01a534f84839a66b127b88183bd81f6ab3778289150aa79f83ae126e4a8e0df",
+            .url = "git+https://github.com/vrischmann/zig-sqlite?ref=master#59c06617d5b86546c0c739e73ae01d3965dbe8ce",
+            .hash = "sqlite-3.48.0-F2R_a_uGDgCfOH5UEJYjuOCe-HixnLjToxOdEGAEM3xk",
         },
-        .tracy = .{
-            // Point back to cipharius/zig-tracy once it's been updated to support Zig 0.13
-            .url = "https://github.com/kcbanner/zig-tracy/archive/40ad7b4c7976dcd94b2f3a89470b2e84d42b7b8c.tar.gz",
-            .hash = "1220847a8e1395c15ac39e200227a1f102c5a93be2ef12528d4ff97dd79ce164906a",
-            //.path = "../modules/zig-tracy",
-        },
+        .vhtml = .{ .path = "./modules/vhtml" },
         .yaml = .{ .path = "./modules/yaml" },
-        .zap = .{
-            .url = "git+https://github.com/zigzap/zap#29b923f96ee09d855b603866d2e149d506f72679",
-            .hash = "1220399fcdfff1fd73f8cbced2530ab805391f31d8c188db99ae7ba978dd77fd2814",
+        .serve = .{
+            .url = "git+https://github.com/sea-grass/serve?ref=main#a6822a7427fe03ef64406d31cbfda796c6d1da7f",
+            .hash = "serve-0.0.1-LyESynYVAADMd4mawOoPHzdYiDE8zgumIwzrICXxiO5A",
+        },
+        .quickjs = .{
+            .url = "git+https://github.com/sea-grass/quickjs-zig?ref=main#b6284947a7d9ce45ad78b5778df2e9e93ff16ce8",
+            .hash = "quickjs-0.0.0-h7npNw4HAADzhLcIm9aLQ1uC9xOOqw-x0p13W_YyjzUc",
         },
     },
     .paths = .{

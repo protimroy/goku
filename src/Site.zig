@@ -13,7 +13,6 @@ const page = @import("page.zig");
 const std = @import("std");
 const storage = @import("storage.zig");
 const testing = std.testing;
-const tracy = @import("tracy");
 const Database = @import("Database.zig");
 const markdown = @import("markdown.zig");
 
@@ -25,6 +24,37 @@ site_root: []const u8,
 url_prefix: ?[]const u8,
 allocator: mem.Allocator,
 db: *Database,
+component_assets: *ComponentAssets,
+
+pub const ComponentAssets = struct {
+    arena: *heap.ArenaAllocator,
+    style_map: std.StringArrayHashMapUnmanaged([]const u8),
+    script_map: std.StringArrayHashMapUnmanaged([]const u8),
+
+    pub fn init(allocator: mem.Allocator, db: *Database) !ComponentAssets {
+        const arena = try allocator.create(heap.ArenaAllocator);
+        arena.* = .init(allocator);
+        _ = db;
+
+        return .{
+            .arena = arena,
+            .style_map = .empty,
+            .script_map = .empty,
+        };
+    }
+
+    pub fn deinit(self: *ComponentAssets) void {
+        const allocator = self.arena.*.child_allocator;
+        self.arena.deinit();
+        allocator.destroy(self.arena);
+        self.* = undefined;
+    }
+
+    fn getNumComponents(db: *Database) !usize {
+        var stmt = try db.db.prepare("SELECT count(*) FROM components;");
+        defer stmt.deinit();
+    }
+};
 
 const Site = @This();
 
@@ -97,38 +127,109 @@ pub fn init(
     database: *Database,
     site_root: []const u8,
     url_prefix: ?[]const u8,
-) Site {
-    return .{
+) !Site {
+    const component_assets = try allocator.create(ComponentAssets);
+    errdefer allocator.destroy(component_assets);
+    component_assets.* = try .init(allocator, database);
+    errdefer component_assets.deinit();
+
+    const site: Site = .{
         .allocator = allocator,
         .db = database,
         .site_root = site_root,
         .url_prefix = url_prefix,
+        .component_assets = component_assets,
     };
+
+    try site.validate();
+
+    return site;
 }
 
 pub fn deinit(self: Site) void {
-    _ = self;
+    self.component_assets.deinit();
+    self.allocator.destroy(self.component_assets);
+}
+
+pub fn validate(self: Site) !void {
+    // Find all unique templates in pages
+    // Ensure each template exists as an entry in sqlite
+
+    const get_templates = .{
+        .stmt =
+        \\ SELECT DISTINCT template
+        \\ FROM pages
+        ,
+        .type = struct {
+            template: []const u8,
+        },
+    };
+
+    var get_stmt = try self.db.db.prepare(get_templates.stmt);
+    defer get_stmt.deinit();
+
+    var it = try get_stmt.iterator(
+        get_templates.type,
+        .{},
+    );
+
+    var arena = heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+
+    while (try it.nextAlloc(arena.allocator(), .{})) |entry| {
+        const get_template = .{
+            .stmt =
+            \\ SELECT filepath
+            \\ FROM templates
+            \\ WHERE filepath = ?
+            \\ LIMIT 1
+            ,
+            .type = struct {
+                filepath: []const u8,
+            },
+        };
+
+        var get_template_stmt = try self.db.db.prepare(get_template.stmt);
+        defer get_template_stmt.deinit();
+
+        var buf: [fs.max_path_bytes]u8 = undefined;
+        var fba = heap.FixedBufferAllocator.init(&buf);
+        const filepath = try fs.path.join(fba.allocator(), &.{
+            self.site_root,
+            "templates",
+            entry.template,
+        });
+
+        const row = try get_template_stmt.oneAlloc(
+            get_template.type,
+            arena.allocator(),
+            .{},
+            .{
+                .filepath = filepath,
+            },
+        );
+
+        if (row == null) {
+            log.err("The template ({s}) does not exist.", .{entry.template});
+            return error.MissingTemplate;
+        }
+    }
 }
 
 pub fn write(
     self: Site,
-    part: enum { sitemap, assets, pages },
+    part: enum { sitemap, assets, pages, component_assets },
     out_dir: fs.Dir,
 ) !void {
     switch (part) {
         .sitemap => try writeSitemap(self, out_dir),
         .assets => try writeAssets(out_dir),
         .pages => try writePages(self, out_dir),
+        .component_assets => try writeComponentAssets(self, out_dir),
     }
 }
 
 fn writeSitemap(self: Site, out_dir: fs.Dir) !void {
-    const zone = tracy.initZone(
-        @src(),
-        .{ .name = "Write sitemap" },
-    );
-    defer zone.deinit();
-
     var file = try out_dir.createFile("_sitemap.html", .{});
     defer file.close();
 
@@ -171,38 +272,81 @@ fn writePages(self: Site, out_dir: fs.Dir) !void {
     defer batch_allocator.deinit();
 
     while (try it.next()) |entry| {
-        const zone = tracy.initZone(
-            @src(),
-            .{ .name = "Render Page Loop" },
-        );
-        defer zone.deinit();
-
         defer batch_allocator.flush();
 
         try _render(
             batch_allocator.allocator(),
             self.db,
+            self.component_assets,
             self.url_prefix,
             self.site_root,
             entry.filepath,
             entry.slug,
+            .wants_content,
             out_dir,
         );
     }
 }
 
-// Assumes that the provided allocator is an arena.
-// Reads the page and its associated template from the filesystem
-// and writes the rendered page to a file in the out_dir.
+fn writeComponentAssets(self: Site, out_dir: fs.Dir) !void {
+    {
+        var css_file = try out_dir.createFile("component.css", .{});
+        defer css_file.close();
+        const file_writer = css_file.writer();
+
+        log.info("Write component.css", .{});
+
+        if (self.component_assets.style_map.count() > 0) {
+            for (self.component_assets.style_map.values()) |chunk| {
+                try file_writer.print("{s}", .{chunk});
+            }
+        }
+    }
+
+    {
+        var js_file = try out_dir.createFile("component.js", .{});
+        defer js_file.close();
+        const file_writer = js_file.writer();
+
+        log.info("Write component.js", .{});
+
+        if (self.component_assets.script_map.count() > 0) {
+            for (self.component_assets.script_map.values()) |chunk| {
+                try file_writer.print(
+                    \\;(function() {{
+                    \\  'use strict';
+                    \\{[script_body]s}
+                    \\}}())
+                ,
+                    .{ .script_body = chunk },
+                );
+            }
+        }
+    }
+}
+
+/// Assumes that the provided allocator is an arena.
+/// Reads the page and its associated template from the filesystem
+/// and writes the rendered page to a file in the out_dir.
+///
+/// May also write to the `component.css` file if the page wrote
+/// to a dedicated styles buffer while rendering.
 fn _render(
     ally: mem.Allocator,
     db: *Database,
+    component_assets: *ComponentAssets,
     url_prefix: ?[]const u8,
     site_root: []const u8,
     filepath: []const u8,
     slug: []const u8,
+    wants: DispatchWants,
     out_dir: fs.Dir,
 ) !void {
+    switch (wants) {
+        .wants_raw => unreachable,
+        else => {},
+    }
+
     // Read the file contents
     const contents = contents: {
         const in_file = try fs.openFileAbsolute(
@@ -301,7 +445,9 @@ fn _render(
         p,
         .{ .bytes = template },
         db,
+        component_assets,
         url_prefix,
+        wants,
         html_buffer.writer(),
     );
 
@@ -314,26 +460,157 @@ pub const TemplateOption = union(enum) {
     bytes: []const u8,
 };
 
-// Write `page` as an html document to the `writer`.
+pub fn getDispatchSourceFile(site: *Site, arena: mem.Allocator, slug: []const u8) !?[]const u8 {
+    var stmt = try site.db.db.prepare(
+        \\SELECT filepath FROM pages WHERE slug = ?;
+    );
+    defer stmt.deinit();
+
+    if (try stmt.oneAlloc(struct { filepath: []const u8 }, arena, .{}, .{ .slug = slug })) |row| {
+        return row.filepath;
+    }
+
+    return null;
+}
+
+const DispatchError = error{ NotFound, DbError, ReadError, RenderError, OOM };
+pub const DispatchWants = enum { wants_editor, wants_raw, wants_content };
+const DispatchOptions = struct {
+    wants: DispatchWants = .wants_content,
+};
+pub fn dispatch(site: *Site, slug: []const u8, writer: anytype, styles_writer: anytype, scripts_writer: anytype, options: DispatchOptions) DispatchError!void {
+    // Clear style and script maps between page navigations
+    site.component_assets.script_map.clearRetainingCapacity();
+    site.component_assets.style_map.clearRetainingCapacity();
+
+    log.debug("Dispatch request for slug ({s})", .{slug});
+    var stmt = site.db.db.prepare(
+        \\SELECT filepath, template FROM pages WHERE slug = ?;
+        ,
+    ) catch return error.DbError;
+    defer stmt.deinit();
+
+    if (stmt.oneAlloc(struct { filepath: []const u8, template: []const u8 }, site.allocator, .{}, .{ .slug = slug }) catch return DispatchError.DbError) |row| {
+        var arena = heap.ArenaAllocator.init(site.allocator);
+        defer arena.deinit();
+        const ally = arena.allocator();
+
+        const filepath = row.filepath;
+        const site_root = site.site_root;
+        const db = site.db;
+        const url_prefix = site.url_prefix orelse "";
+
+        // Read the file contents
+        const contents = contents: {
+            const in_file = fs.openFileAbsolute(
+                filepath,
+                .{},
+            ) catch return DispatchError.ReadError;
+            defer in_file.close();
+
+            break :contents in_file.readToEndAlloc(
+                ally,
+                math.maxInt(u32),
+            ) catch return DispatchError.OOM;
+        };
+
+        // Parse the Page metadata
+        const result = page.CodeFence.parse(contents) orelse
+            return error.RenderError;
+
+        const p: page.Page = .{
+            .markdown = .{
+                .frontmatter = result.within,
+                .content = result.after,
+            },
+        };
+
+        switch (options.wants) {
+            .wants_raw => {
+                writer.print("---\n{s}\n---\n{s}\n", .{ p.markdown.frontmatter, p.markdown.content }) catch {};
+            },
+            else => {
+                const data = p.data(ally) catch return DispatchError.RenderError;
+
+                var html_buffer = io.bufferedWriter(writer);
+                var styles_buffer = io.bufferedWriter(styles_writer);
+                var scripts_buffer = io.bufferedWriter(scripts_writer);
+
+                // Load the template from the filesystem
+                const template = template: {
+                    if (data.template) |t| {
+                        const template_path = fs.path.join(
+                            ally,
+                            &.{ site_root, "templates", t },
+                        ) catch return DispatchError.OOM;
+
+                        var template_file = fs.openFileAbsolute(
+                            template_path,
+                            .{},
+                        ) catch return DispatchError.ReadError;
+                        defer template_file.close();
+
+                        const template = template_file.readToEndAlloc(
+                            ally,
+                            math.maxInt(u32),
+                        ) catch return DispatchError.OOM;
+                        break :template template;
+                    }
+
+                    break :template fallback_template;
+                };
+
+                renderPage(
+                    ally,
+                    p,
+                    .{ .bytes = template },
+                    db,
+                    site.component_assets,
+                    url_prefix,
+                    options.wants,
+                    html_buffer.writer(),
+                ) catch return DispatchError.RenderError;
+
+                html_buffer.flush() catch {};
+                styles_buffer.flush() catch {};
+                scripts_buffer.flush() catch {};
+            },
+        }
+    } else {
+        return DispatchError.NotFound;
+    }
+}
+
+/// Write `page` as an html document to the `writer`.
+///
+/// TODO Assuming that the allocator is an arena.
 fn renderPage(
     allocator: mem.Allocator,
     p: page.Page,
     tmpl: TemplateOption,
     db: *Database,
+    component_assets: *ComponentAssets,
     url_prefix: ?[]const u8,
+    wants: DispatchWants,
     writer: anytype,
 ) !void {
+    const wants2 = e: switch (wants) {
+        .wants_raw => unreachable,
+        else => |e| break :e e,
+    };
+
     const meta = try p.data(allocator);
     defer meta.deinit(allocator);
 
-    log.debug(
-        "rendering ({s})[{s}]",
+    log.info(
+        "Render ({s})[{s}]",
         .{ meta.title.?, meta.slug },
     );
 
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
     const content = if (meta.allow_html) content: {
+        var buf = std.ArrayList(u8).init(allocator);
+        defer buf.deinit();
+
         try mustache.renderStream(
             allocator,
             p.markdown.content,
@@ -341,10 +618,11 @@ fn renderPage(
                 .db = db,
                 .data = meta,
                 .site_root = url_prefix orelse "",
+                .component_assets = component_assets,
             },
             buf.writer(),
         );
-        break :content buf.items;
+        break :content try buf.toOwnedSlice();
     } else p.markdown.content;
 
     const template = tmpl.bytes;
@@ -358,6 +636,17 @@ fn renderPage(
         content_buf.writer(),
     );
 
+    switch (wants2) {
+        .wants_editor => {
+            const editor_inline_script = "<script>" ++ @embedFile("editor_inline_script.js") ++ "</script>";
+            try content_buf.appendSlice(editor_inline_script);
+            const editor_inline_styles = "<style>" ++ @embedFile("editor_inline_styles.css") ++ "</style>";
+            try content_buf.appendSlice(editor_inline_styles);
+        },
+        .wants_content => {},
+        .wants_raw => unreachable,
+    }
+
     try mustache.renderStream(
         allocator,
         template,
@@ -366,6 +655,7 @@ fn renderPage(
             .data = meta,
             .content = content_buf.items,
             .site_root = url_prefix orelse "",
+            .component_assets = component_assets,
         },
         writer,
     );
@@ -382,6 +672,7 @@ const @"test" = struct {
                 \\---
                 \\slug: /
                 \\title: Hello, world!
+                \\template: foo.html
                 \\---
                 ,
             },
@@ -402,7 +693,10 @@ const @"test" = struct {
         var buf = std.ArrayList(u8).init(testing.allocator);
         defer buf.deinit();
 
-        const writer = buf.writer();
+        var styles_buf = std.ArrayList(u8).init(testing.allocator);
+        defer styles_buf.deinit();
+        var scripts_buf = std.ArrayList(u8).init(testing.allocator);
+        defer scripts_buf.deinit();
 
         try renderPage(
             testing.allocator,
@@ -410,7 +704,10 @@ const @"test" = struct {
             .{ .bytes = template },
             &db,
             null,
-            writer,
+            .wants_content,
+            buf.writer(),
+            styles_buf.writer(),
+            scripts_buf.writer(),
         );
 
         try testing.expectEqualStrings(expected, buf.items);

@@ -6,25 +6,19 @@ template: page.html
 description: A static site generator written in Zig.
 ---
 
-{{& collections.test.list }}
 
-<style>
-  #spinner {
-    animation: spin 4s infinite linear;
-    display: inline-block;
-    transform-origin: center;
-  }
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-</style>
+Write your website in markdown with server-side rendered components and mustache for templating.
 
-<div id="spinner">
+{{&component sample-code.js}}
 
-- [Docs](/docs)
-- [Source code](https://github.com/sea-grass/goku)
-- [Changelog](/changelog)
-  
-</div>
+## Use cases
+
+- Portfolio websites
+- Tech demos
+- Static file hosting
+- Blogging
+- Newsletters
+
+
+
 
