@@ -316,9 +316,7 @@ fn ParserType(comptime Writer: type) type {
                 c.MD_SPAN_CODE => writer.writeAll("</code>") catch return -1,
                 c.MD_SPAN_DEL => {},
                 c.MD_SPAN_EM => {},
-                c.MD_SPAN_IMG => {
-                    std.log.info("why leave an image...", .{});
-                },
+                c.MD_SPAN_IMG => {},
                 c.MD_SPAN_STRONG => writer.writeAll("</strong>") catch return -1,
                 c.MD_SPAN_U => {},
 

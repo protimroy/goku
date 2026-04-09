@@ -32,7 +32,7 @@ pub fn build(unlimited_allocator: mem.Allocator, args: cli.Command.Build) !void 
 
     try indexSite(unlimited_allocator, site_root, &db);
 
-    var site: Site = try .init(unlimited_allocator, &db, site_root, args.url_prefix);
+    var site: Site = try .init(unlimited_allocator, &db, site_root, args.url_prefix, args.theme);
     defer site.deinit();
 
     var out_dir = if (fs.path.isAbsolute(args.out_dir))
@@ -69,7 +69,7 @@ pub fn preview(unlimited_allocator: mem.Allocator, args: cli.Command.Preview) !v
 
     try indexSite(unlimited_allocator, site_root, &db);
 
-    var site: Site = try .init(unlimited_allocator, &db, site_root, args.url_prefix);
+    var site: Site = try .init(unlimited_allocator, &db, site_root, args.url_prefix, args.theme);
     defer site.deinit();
 
     var out_dir = try fs.openDirAbsolute(args.out_dir, .{});
@@ -130,7 +130,7 @@ const PreviewServer = struct {
         defer styles_buf.deinit();
 
         var scripts_buf = std.ArrayList(u8).init(req.arena);
-        defer styles_buf.deinit();
+        defer scripts_buf.deinit();
 
         context.site.dispatch(req.url.path, res.writer(), styles_buf.writer(), scripts_buf.writer(), .{ .wants = config }) catch |err| {
             switch (err) {
@@ -147,22 +147,48 @@ const PreviewServer = struct {
                     var dir = try fs.openDirAbsolute(context.out_dir, .{});
                     defer dir.close();
 
-                    var file = dir.openFile(sub_path, .{}) catch |err2| {
-                        switch (err2) {
-                            error.FileNotFound => {
-                                res.status = 404;
-                                res.body = "Not foond";
-                                return;
-                            },
+                    const resolved_path = resolved_path: {
+                        const stat = dir.statFile(sub_path) catch |stat_err| switch (stat_err) {
+                            error.FileNotFound => null,
                             else => {
-                                std.log.err("Encountered error when dispatching request: {any}", .{err2});
+                                std.log.err("Encountered error when dispatching request: {any}", .{stat_err});
                                 res.status = 500;
                                 res.body = "Uh oh!";
                                 return;
                             },
+                        };
+
+                        if (stat) |sub_stat| {
+                            switch (sub_stat.kind) {
+                                .file => break :resolved_path sub_path,
+                                .directory => break :resolved_path try fs.path.join(req.arena, &.{ sub_path, "index.html" }),
+                                else => {
+                                    res.status = 404;
+                                    res.body = "Not foond";
+                                    return;
+                                },
+                            }
                         }
+
+                        break :resolved_path try fs.path.join(req.arena, &.{ sub_path, "index.html" });
+                    };
+
+                    var file = dir.openFile(resolved_path, .{}) catch |open_err| switch (open_err) {
+                        error.FileNotFound => {
+                            res.status = 404;
+                            res.body = "Not foond";
+                            return;
+                        },
+                        else => {
+                            std.log.err("Encountered error when dispatching request: {any}", .{open_err});
+                            res.status = 500;
+                            res.body = "Uh oh!";
+                            return;
+                        },
                     };
                     defer file.close();
+
+                    setStaticContentType(res, resolved_path);
 
                     var buf: [1024]u8 = undefined;
                     const reader = file.reader();
@@ -174,7 +200,7 @@ const PreviewServer = struct {
                     }
 
                     res.header("Cache-Control", "max-age=10");
-                    log.info("Done serving {s}", .{sub_path});
+                    log.info("Done serving {s}", .{resolved_path});
                 },
             }
         };
@@ -267,6 +293,11 @@ const PreviewServer = struct {
     fn redirect(status_code: u16, url: []const u8, res: *httpz.Response) void {
         res.status = status_code;
         res.header("Location", url);
+    }
+
+    fn setStaticContentType(res: *httpz.Response, path: []const u8) void {
+        const ext = fs.path.extension(path);
+        res.content_type = httpz.ContentType.forExtension(ext);
     }
 };
 
