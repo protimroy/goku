@@ -1,3 +1,4 @@
+const assets = @import("assets.zig");
 const BatchAllocator = @import("BatchAllocator.zig");
 const bulma = @import("bulma");
 const htmx = @import("htmx");
@@ -15,6 +16,7 @@ const storage = @import("storage.zig");
 const testing = std.testing;
 const Database = @import("Database.zig");
 const markdown = @import("markdown.zig");
+const theme = @import("theme.zig");
 
 // TODO remove this property
 // Site root is only used for constructing an absolute path to
@@ -25,6 +27,9 @@ url_prefix: ?[]const u8,
 allocator: mem.Allocator,
 db: *Database,
 component_assets: *ComponentAssets,
+selected_theme_name: ?[]const u8,
+themes: theme.Registry,
+asset_manifest: assets.Manifest,
 
 pub const ComponentAssets = struct {
     arena: *heap.ArenaAllocator,
@@ -57,6 +62,18 @@ pub const ComponentAssets = struct {
 };
 
 const Site = @This();
+
+pub const Pagination = struct {
+    collection: []const u8,
+    current_page: u32,
+    per_page: u32,
+    total_items: u32,
+    base_slug: []const u8,
+
+    pub fn totalPages(self: Pagination) u32 {
+        return @max(1, std.math.divCeil(u32, self.total_items, self.per_page) catch 1);
+    }
+};
 
 const HtmlSitemap = struct {
     // HTML HtmlSitemap looks like this:
@@ -127,11 +144,19 @@ pub fn init(
     database: *Database,
     site_root: []const u8,
     url_prefix: ?[]const u8,
+    selected_theme_name: ?[]const u8,
 ) !Site {
     const component_assets = try allocator.create(ComponentAssets);
     errdefer allocator.destroy(component_assets);
     component_assets.* = try .init(allocator, database);
     errdefer component_assets.deinit();
+
+    var themes = theme.Registry.init(allocator);
+    errdefer themes.deinit();
+    try themes.loadSiteThemes(site_root, selected_theme_name);
+
+    var asset_manifest = assets.Manifest.init(allocator);
+    errdefer asset_manifest.deinit();
 
     const site: Site = .{
         .allocator = allocator,
@@ -139,6 +164,9 @@ pub fn init(
         .site_root = site_root,
         .url_prefix = url_prefix,
         .component_assets = component_assets,
+        .selected_theme_name = selected_theme_name,
+        .themes = themes,
+        .asset_manifest = asset_manifest,
     };
 
     try site.validate();
@@ -146,9 +174,15 @@ pub fn init(
     return site;
 }
 
-pub fn deinit(self: Site) void {
+pub fn deinit(self: *Site) void {
     self.component_assets.deinit();
     self.allocator.destroy(self.component_assets);
+    self.themes.deinit();
+    self.asset_manifest.deinit();
+}
+
+fn resolveTheme(self: *const Site, preferred_name: ?[]const u8) ?*const theme.Theme {
+    return self.themes.resolve(preferred_name orelse self.selected_theme_name);
 }
 
 pub fn validate(self: Site) !void {
@@ -217,15 +251,15 @@ pub fn validate(self: Site) !void {
 }
 
 pub fn write(
-    self: Site,
+    self: *Site,
     part: enum { sitemap, assets, pages, component_assets },
     out_dir: fs.Dir,
 ) !void {
     switch (part) {
-        .sitemap => try writeSitemap(self, out_dir),
-        .assets => try writeAssets(out_dir),
-        .pages => try writePages(self, out_dir),
-        .component_assets => try writeComponentAssets(self, out_dir),
+        .sitemap => try writeSitemap(self.*, out_dir),
+        .assets => try writeAssets(self, out_dir),
+        .pages => try writePages(self.*, out_dir),
+        .component_assets => try writeComponentAssets(self.*, out_dir),
     }
 }
 
@@ -240,7 +274,7 @@ fn writeSitemap(self: Site, out_dir: fs.Dir) !void {
     try file_buf.flush();
 }
 
-fn writeAssets(out_dir: fs.Dir) !void {
+fn writeAssets(self: *Site, out_dir: fs.Dir) !void {
     {
         var file = try out_dir.createFile(
             "bulma.css",
@@ -258,6 +292,58 @@ fn writeAssets(out_dir: fs.Dir) !void {
         defer file.close();
         try file.writer().writeAll(htmx.js);
     }
+
+    try self.asset_manifest.processSiteAssets(self.site_root, out_dir);
+    try writeThemeAssets(self.*, out_dir);
+}
+
+fn writeThemeAssets(self: Site, out_dir: fs.Dir) !void {
+    const allocator = self.allocator;
+
+    for (self.themes.map.keys()) |theme_name| {
+        const theme_root = try fs.path.join(allocator, &.{ self.site_root, "themes", theme_name });
+        defer allocator.free(theme_root);
+
+        const walker_subpath = try std.fmt.allocPrint(allocator, "themes/{s}", .{theme_name});
+        defer allocator.free(walker_subpath);
+
+        var walker = @import("source/filesystem.zig").walker(self.site_root, walker_subpath);
+        while (walker.next() catch |err| switch (err) {
+            error.CannotOpenDirectory => break,
+            else => return err,
+        }) |entry| {
+            var source_path_buf: [fs.max_path_bytes]u8 = undefined;
+            const source_abs = try entry.realpath(&source_path_buf);
+            const rel = try fs.path.relative(allocator, theme_root, source_abs);
+            defer allocator.free(rel);
+            if (mem.eql(u8, rel, "theme.yaml")) continue;
+
+            var file = try entry.openFile();
+            defer file.close();
+            const contents = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+            defer allocator.free(contents);
+
+            const out_rel = try fs.path.join(allocator, &.{ "theme", theme_name, rel });
+            defer allocator.free(out_rel);
+            try writeOutputFile(out_dir, out_rel, contents);
+        }
+    }
+}
+
+fn writeOutputFile(out_dir: fs.Dir, rel_path: []const u8, contents: []const u8) !void {
+    if (fs.path.dirname(rel_path)) |parent| {
+        var dir = try out_dir.makeOpenPath(parent, .{});
+        defer dir.close();
+
+        var file = try dir.createFile(fs.path.basename(rel_path), .{});
+        defer file.close();
+        try file.writeAll(contents);
+        return;
+    }
+
+    var file = try out_dir.createFile(rel_path, .{});
+    defer file.close();
+    try file.writeAll(contents);
 }
 
 fn writePages(self: Site, out_dir: fs.Dir) !void {
@@ -274,18 +360,79 @@ fn writePages(self: Site, out_dir: fs.Dir) !void {
     while (try it.next()) |entry| {
         defer batch_allocator.flush();
 
+        const page_data = try readPageData(batch_allocator.allocator(), entry.filepath);
+        if (page_data.paginate) |per_page| {
+            if (page_data.collection) |collection| {
+                const total_items = try getCollectionCount(self.db, collection);
+                const total_pages = @max(1, std.math.divCeil(u32, total_items, per_page) catch 1);
+
+                var page_number: u32 = 1;
+                while (page_number <= total_pages) : (page_number += 1) {
+                    try _render(
+                        batch_allocator.allocator(),
+                        &self,
+                        entry.filepath,
+                        entry.slug,
+                        .wants_content,
+                        out_dir,
+                        .{
+                            .collection = collection,
+                            .current_page = page_number,
+                            .per_page = per_page,
+                            .total_items = total_items,
+                            .base_slug = entry.slug,
+                        },
+                    );
+                }
+                continue;
+            }
+        }
+
         try _render(
             batch_allocator.allocator(),
-            self.db,
-            self.component_assets,
-            self.url_prefix,
-            self.site_root,
+            &self,
             entry.filepath,
             entry.slug,
             .wants_content,
             out_dir,
+            null,
         );
     }
+}
+
+fn readPageData(allocator: mem.Allocator, filepath: []const u8) !page.Data {
+    var file = try fs.openFileAbsolute(filepath, .{});
+    defer file.close();
+
+    const contents = try file.readToEndAlloc(allocator, std.math.maxInt(u32));
+    const result = page.CodeFence.parse(contents) orelse return error.MalformedPageFile;
+
+    const p: page.Page = .{
+        .markdown = .{
+            .frontmatter = result.within,
+            .content = result.after,
+        },
+    };
+
+    return try p.data(allocator);
+}
+
+fn getCollectionCount(db: *Database, collection: []const u8) !u32 {
+    var stmt = try db.db.prepare(
+        \\SELECT count(*) as count
+        \\FROM pages
+        \\WHERE collection = ?
+    );
+    defer stmt.deinit();
+
+    const row = try stmt.oneAlloc(
+        struct { count: u32 },
+        std.heap.page_allocator,
+        .{},
+        .{ .collection = collection },
+    ) orelse return 0;
+
+    return row.count;
 }
 
 fn writeComponentAssets(self: Site, out_dir: fs.Dir) !void {
@@ -333,14 +480,12 @@ fn writeComponentAssets(self: Site, out_dir: fs.Dir) !void {
 /// to a dedicated styles buffer while rendering.
 fn _render(
     ally: mem.Allocator,
-    db: *Database,
-    component_assets: *ComponentAssets,
-    url_prefix: ?[]const u8,
-    site_root: []const u8,
+    site: *const Site,
     filepath: []const u8,
     slug: []const u8,
     wants: DispatchWants,
     out_dir: fs.Dir,
+    pagination: ?Pagination,
 ) !void {
     switch (wants) {
         .wants_raw => unreachable,
@@ -379,14 +524,19 @@ fn _render(
         var filename_buf = std.ArrayList(u8).init(ally);
         defer filename_buf.deinit();
 
+        const effective_slug = if (pagination) |page_ctx|
+            try paginationSlug(ally, page_ctx)
+        else
+            slug;
+
         // TODO the function accepts slug as an argument but we'll also have
         // the slug after parsing the page metadata out. Is it redundant to
         // accept the slug as a function argument?
-        debug.assert(slug.len > 0);
-        debug.assert(slug[0] == '/');
-        if (slug.len > 1) {
-            debug.assert(!mem.endsWith(u8, slug, "/"));
-            try filename_buf.appendSlice(slug);
+        debug.assert(effective_slug.len > 0);
+        debug.assert(effective_slug[0] == '/');
+        if (effective_slug.len > 1) {
+            debug.assert(!mem.endsWith(u8, effective_slug, "/"));
+            try filename_buf.appendSlice(effective_slug);
         }
         try filename_buf.appendSlice("/index.html");
 
@@ -421,7 +571,7 @@ fn _render(
         if (data.template) |t| {
             const template_path = try fs.path.join(
                 ally,
-                &.{ site_root, "templates", t },
+                &.{ site.site_root, "templates", t },
             );
 
             var template_file = try fs.openFileAbsolute(
@@ -444,9 +594,12 @@ fn _render(
         ally,
         p,
         .{ .bytes = template },
-        db,
-        component_assets,
-        url_prefix,
+        site.db,
+        site.component_assets,
+        site.url_prefix,
+        site.resolveTheme(data.theme),
+        &site.asset_manifest,
+        pagination,
         wants,
         html_buffer.writer(),
     );
@@ -567,6 +720,9 @@ pub fn dispatch(site: *Site, slug: []const u8, writer: anytype, styles_writer: a
                     db,
                     site.component_assets,
                     url_prefix,
+                    site.resolveTheme(data.theme),
+                    &site.asset_manifest,
+                    null,
                     options.wants,
                     html_buffer.writer(),
                 ) catch return DispatchError.RenderError;
@@ -591,6 +747,9 @@ fn renderPage(
     db: *Database,
     component_assets: *ComponentAssets,
     url_prefix: ?[]const u8,
+    selected_theme: ?*const theme.Theme,
+    asset_manifest: *const assets.Manifest,
+    pagination: ?Pagination,
     wants: DispatchWants,
     writer: anytype,
 ) !void {
@@ -619,6 +778,9 @@ fn renderPage(
                 .data = meta,
                 .site_root = url_prefix orelse "",
                 .component_assets = component_assets,
+                .theme = selected_theme,
+                .asset_manifest = asset_manifest,
+                .pagination = pagination,
             },
             buf.writer(),
         );
@@ -656,9 +818,23 @@ fn renderPage(
             .content = content_buf.items,
             .site_root = url_prefix orelse "",
             .component_assets = component_assets,
+            .theme = selected_theme,
+            .asset_manifest = asset_manifest,
+            .pagination = pagination,
         },
         writer,
     );
+}
+
+fn paginationSlug(allocator: mem.Allocator, page_ctx: Pagination) ![]const u8 {
+    if (page_ctx.current_page <= 1) {
+        return page_ctx.base_slug;
+    }
+
+    return if (mem.eql(u8, page_ctx.base_slug, "/"))
+        try std.fmt.allocPrint(allocator, "/page/{d}", .{page_ctx.current_page})
+    else
+        try std.fmt.allocPrint(allocator, "{s}/page/{d}", .{ page_ctx.base_slug, page_ctx.current_page });
 }
 
 const @"test" = struct {
@@ -693,21 +869,24 @@ const @"test" = struct {
         var buf = std.ArrayList(u8).init(testing.allocator);
         defer buf.deinit();
 
-        var styles_buf = std.ArrayList(u8).init(testing.allocator);
-        defer styles_buf.deinit();
-        var scripts_buf = std.ArrayList(u8).init(testing.allocator);
-        defer scripts_buf.deinit();
+        var component_assets = try ComponentAssets.init(testing.allocator, &db);
+        defer component_assets.deinit();
+
+        var asset_manifest = assets.Manifest.init(testing.allocator);
+        defer asset_manifest.deinit();
 
         try renderPage(
             testing.allocator,
             page_to_render,
             .{ .bytes = template },
             &db,
+            &component_assets,
+            null,
+            null,
+            &asset_manifest,
             null,
             .wants_content,
             buf.writer(),
-            styles_buf.writer(),
-            scripts_buf.writer(),
         );
 
         try testing.expectEqualStrings(expected, buf.items);

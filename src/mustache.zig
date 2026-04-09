@@ -1,3 +1,4 @@
+const assets = @import("assets.zig");
 const c = @import("c");
 const debug = std.debug;
 const fmt = std.fmt;
@@ -15,6 +16,8 @@ const std = @import("std");
 const storage = @import("storage.zig");
 const testing = std.testing;
 const ComponentAssets = @import("Site.zig").ComponentAssets;
+const Pagination = @import("Site.zig").Pagination;
+const Theme = @import("theme.zig").Theme;
 
 pub fn renderStream(allocator: mem.Allocator, template: []const u8, context: anytype, writer: anytype) !void {
     var arena = heap.ArenaAllocator.init(allocator);
@@ -104,7 +107,12 @@ fn GetHandleType(comptime UserContext: type) type {
                             const value = @field(get_handle.user_context.data, f.name);
 
                             if (value) |v| {
-                                return try arena.dupeZ(u8, v);
+                                switch (@typeInfo(@TypeOf(v))) {
+                                    .pointer => return try arena.dupeZ(u8, v),
+                                    .int, .comptime_int => return try fmt.allocPrint(arena, "{d}", .{v}),
+                                    .bool => return if (v) "true" else "false",
+                                    else => return error.UnsupportedDataFieldType,
+                                }
                             }
 
                             return "";
@@ -129,12 +137,15 @@ fn GetHandleType(comptime UserContext: type) type {
             var list_buf = std.ArrayList(u8).init(arena);
             defer list_buf.deinit();
 
+            const pagination = getPagination(get_handle, collection);
             const get_pages = .{
                 .stmt =
                 \\SELECT slug, date, title
                 \\FROM pages
                 \\WHERE collection = ?
+                \\AND slug != ?
                 \\ORDER BY date DESC, title ASC
+                \\LIMIT ? OFFSET ?
                 ,
                 .type = struct {
                     slug: []const u8,
@@ -146,9 +157,17 @@ fn GetHandleType(comptime UserContext: type) type {
             var get_stmt = try get_handle.user_context.db.db.prepare(get_pages.stmt);
             defer get_stmt.deinit();
 
+            const limit: u32 = if (pagination) |page_ctx| page_ctx.per_page else std.math.maxInt(u32);
+            const offset: u32 = if (pagination) |page_ctx| (page_ctx.current_page - 1) * page_ctx.per_page else 0;
+
             var it = try get_stmt.iterator(
                 get_pages.type,
-                .{ .collection = collection },
+                .{
+                    .collection = collection,
+                    .slug = get_handle.user_context.data.slug,
+                    .limit = limit,
+                    .offset = offset,
+                },
             );
 
             try list_buf.appendSlice("<ul>");
@@ -179,6 +198,19 @@ fn GetHandleType(comptime UserContext: type) type {
             }
 
             return "";
+        }
+
+        fn getPagination(get_handle: *GetHandle, collection: []const u8) ?Pagination {
+            if (!@hasField(UserContext, "pagination")) return null;
+
+            const pagination = @field(get_handle.user_context, "pagination");
+            if (pagination) |page_ctx| {
+                if (mem.eql(u8, page_ctx.collection, collection)) {
+                    return page_ctx;
+                }
+            }
+
+            return null;
         }
 
         fn getCollectionsLatest(get_handle: *GetHandle, arena: mem.Allocator, collection: []const u8) ![]const u8 {
@@ -543,34 +575,166 @@ fn MustacheWriterType(comptime UserContext: type) type {
                 }
             };
 
+            const AssetGetter = struct {
+                pub fn getAssetPath(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.startsWith(u8, k, "asset ")) return null;
+                    if (!@hasField(UserContext, "asset_manifest")) return error.MissingAsset;
+
+                    const raw_path = mem.trim(u8, k["asset ".len..], "\"'");
+                    const manifest: *const assets.Manifest = @field(mw.context.user_context, "asset_manifest");
+                    const resolved = manifest.get(raw_path) orelse return error.MissingAsset;
+                    return try fmt.allocPrint(mw.arena, "{s}/{s}", .{ mw.context.user_context.site_root, resolved });
+                }
+            };
+
             const ThemeGetter = struct {
-                pub fn getThemeHead(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
-                    return if (mem.eql(u8, k, "theme.head"))
-                        try fmt.allocPrint(
-                            mw.arena,
-                            \\<link rel="stylesheet" type="text/css" href="{[site_root]s}/bulma.css" />
+                fn themeAssetUrl(mw: *MustacheWriter, selected_theme: *const Theme, asset_path: []const u8) ![]const u8 {
+                    if (mem.startsWith(u8, asset_path, "http://") or mem.startsWith(u8, asset_path, "https://")) {
+                        return try mw.arena.dupe(u8, asset_path);
+                    }
+
+                    if (asset_path.len > 0 and asset_path[0] == '/') {
+                        return try fmt.allocPrint(mw.arena, "{s}{s}", .{ mw.context.user_context.site_root, asset_path });
+                    }
+
+                    if (mem.eql(u8, asset_path, "bulma.css") or mem.eql(u8, asset_path, "htmx.js")) {
+                        return try fmt.allocPrint(mw.arena, "{s}/{s}", .{ mw.context.user_context.site_root, asset_path });
+                    }
+
+                    return try fmt.allocPrint(mw.arena, "{s}/theme/{s}/{s}", .{ mw.context.user_context.site_root, selected_theme.name, asset_path });
+                }
+
+                fn selectedTheme(mw: *MustacheWriter) ?*const Theme {
+                    if (!@hasField(UserContext, "theme")) return null;
+                    return @field(mw.context.user_context, "theme");
+                }
+
+                fn renderStyles(mw: *MustacheWriter, selected_theme: *const Theme) ![]const u8 {
+                    var buf = std.ArrayList(u8).init(mw.arena);
+                    for (selected_theme.styles) |style| {
+                        try buf.writer().print(
+                            "<link rel=\"stylesheet\" type=\"text/css\" href=\"{s}\" />"
                         ,
-                            .{ .site_root = mw.context.user_context.site_root },
-                        )
-                    else
-                        null;
+                            .{try themeAssetUrl(mw, selected_theme, style)},
+                        );
+                    }
+                    return if (buf.items.len == 0) "" else try buf.toOwnedSlice();
+                }
+
+                fn renderScripts(mw: *MustacheWriter, selected_theme: *const Theme) ![]const u8 {
+                    var buf = std.ArrayList(u8).init(mw.arena);
+                    for (selected_theme.scripts) |script| {
+                        try buf.writer().print(
+                            "<script src=\"{s}\"></script>"
+                        ,
+                            .{try themeAssetUrl(mw, selected_theme, script)},
+                        );
+                    }
+                    return if (buf.items.len == 0) "" else try buf.toOwnedSlice();
+                }
+
+                pub fn getThemeHead(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "theme.head")) return null;
+
+                    if (selectedTheme(mw)) |selected_theme| {
+                        return try renderStyles(mw, selected_theme);
+                    }
+
+                    return try fmt.allocPrint(
+                        mw.arena,
+                        \\<link rel="stylesheet" type="text/css" href="{[site_root]s}/bulma.css" />
+                    ,
+                        .{ .site_root = mw.context.user_context.site_root },
+                    );
                 }
 
                 pub fn getThemeBody(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
-                    return if (mem.eql(u8, k, "theme.body"))
-                        // theme.body can be used by themes to inject e.g. scripts.
-                        // It's currently empty, but content authors are still recommended
-                        // to include it in their templates to allow a more seamless upgrade
-                        // once themes do make use of it.
+                    if (!mem.eql(u8, k, "theme.body")) return null;
 
-                        return try fmt.allocPrint(
-                            mw.arena,
-                            \\<script src="{[site_root]s}/htmx.js"></script>
-                        ,
-                            .{ .site_root = mw.context.user_context.site_root },
-                        )
+                    if (selectedTheme(mw)) |selected_theme| {
+                        return try renderScripts(mw, selected_theme);
+                    }
+
+                    return try fmt.allocPrint(
+                        mw.arena,
+                        \\<script src="{[site_root]s}/htmx.js"></script>
+                    ,
+                        .{ .site_root = mw.context.user_context.site_root },
+                    );
+                }
+
+                pub fn getThemeValue(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "theme.name")) return null;
+
+                    if (selectedTheme(mw)) |selected_theme| {
+                        return try mw.arena.dupeZ(u8, selected_theme.name);
+                    }
+
+                    return "default";
+                }
+            };
+
+            const PaginationGetter = struct {
+                fn currentPagination(mw: *MustacheWriter) ?Pagination {
+                    if (!@hasField(UserContext, "pagination")) return null;
+                    return @field(mw.context.user_context, "pagination");
+                }
+
+                fn pageUrl(mw: *MustacheWriter, base_slug: []const u8, page_number: u32) ![]const u8 {
+                    if (page_number <= 1) {
+                        return try fmt.allocPrint(mw.arena, "{s}{s}", .{ mw.context.user_context.site_root, base_slug });
+                    }
+
+                    return if (mem.eql(u8, base_slug, "/"))
+                        try fmt.allocPrint(mw.arena, "{s}/page/{d}", .{ mw.context.user_context.site_root, page_number })
                     else
-                        null;
+                        try fmt.allocPrint(mw.arena, "{s}{s}/page/{d}", .{ mw.context.user_context.site_root, base_slug, page_number });
+                }
+
+                pub fn getCurrent(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "pagination.current")) return null;
+                    const pagination = currentPagination(mw) orelse return "";
+                    return try fmt.allocPrint(mw.arena, "{d}", .{pagination.current_page});
+                }
+
+                pub fn getTotal(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "pagination.total")) return null;
+                    const pagination = currentPagination(mw) orelse return "";
+                    return try fmt.allocPrint(mw.arena, "{d}", .{pagination.totalPages()});
+                }
+
+                pub fn getPrevUrl(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "pagination.prev_url")) return null;
+                    const pagination = currentPagination(mw) orelse return "";
+                    if (pagination.current_page <= 1) return "";
+                    return try pageUrl(mw, pagination.base_slug, pagination.current_page - 1);
+                }
+
+                pub fn getNextUrl(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "pagination.next_url")) return null;
+                    const pagination = currentPagination(mw) orelse return "";
+                    if (pagination.current_page >= pagination.totalPages()) return "";
+                    return try pageUrl(mw, pagination.base_slug, pagination.current_page + 1);
+                }
+
+                pub fn getNav(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "pagination.nav")) return null;
+                    const pagination = currentPagination(mw) orelse return "";
+                    if (pagination.totalPages() <= 1) return "";
+
+                    var buf = std.ArrayList(u8).init(mw.arena);
+                    try buf.appendSlice("<nav class=\"pagination\">");
+
+                    if (pagination.current_page > 1) {
+                        try buf.writer().print("<a href=\"{s}\">Previous</a>", .{try pageUrl(mw, pagination.base_slug, pagination.current_page - 1)});
+                    }
+                    try buf.writer().print("<span>Page {d} of {d}</span>", .{ pagination.current_page, pagination.totalPages() });
+                    if (pagination.current_page < pagination.totalPages()) {
+                        try buf.writer().print("<a href=\"{s}\">Next</a>", .{try pageUrl(mw, pagination.base_slug, pagination.current_page + 1)});
+                    }
+
+                    try buf.appendSlice("</nav>");
+                    return try buf.toOwnedSlice();
                 }
             };
 
@@ -582,11 +746,18 @@ fn MustacheWriterType(comptime UserContext: type) type {
                     .{ .simple = LucideGetter.getIcon },
                     .{ .ctx = CollectionGetter.getList },
                     .{ .ctx = CollectionGetter.getLatest },
+                    .{ .ctx = PaginationGetter.getCurrent },
+                    .{ .ctx = PaginationGetter.getTotal },
+                    .{ .ctx = PaginationGetter.getPrevUrl },
+                    .{ .ctx = PaginationGetter.getNextUrl },
+                    .{ .ctx = PaginationGetter.getNav },
                     .{ .ctx = ComponentGetter.getStyleRef },
                     .{ .ctx = ComponentGetter.getScriptRef },
                     .{ .ctx = ComponentGetter.getComponent },
+                    .{ .ctx = AssetGetter.getAssetPath },
                     .{ .ctx = ThemeGetter.getThemeHead },
                     .{ .ctx = ThemeGetter.getThemeBody },
+                    .{ .ctx = ThemeGetter.getThemeValue },
                 };
 
                 for (getters) |getter| {

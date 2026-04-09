@@ -2,6 +2,8 @@ const fs = @import("std").fs;
 
 pub fn check(dir: *fs.Dir) !void {
     if (try exists(dir, ".gitignore") or
+        try exists(dir, "assets") or
+        try exists(dir, "themes") or
         try exists(dir, "pages") or
         try exists(dir, "templates") or
         try exists(dir, "components") or
@@ -50,6 +52,18 @@ pub fn write(dir: *fs.Dir) !void {
             .data = @embedFile("scaffold/site_template/components/button.js"),
         });
     }
+
+    {
+        var themes_dir = try dir.makeOpenPath("themes/default", .{});
+        defer themes_dir.close();
+
+        try themes_dir.writeFile(.{
+            .sub_path = "theme.yaml",
+            .data = @embedFile("scaffold/site_template/themes/default/theme.yaml"),
+        });
+    }
+
+    try dir.makeDir("assets");
 
     try dir.makeDir("build");
 }

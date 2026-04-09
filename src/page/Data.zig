@@ -15,6 +15,8 @@ title: ?[]const u8 = null,
 date: ?[]const u8 = null,
 template: ?[]const u8 = null,
 description: ?[]const u8 = null,
+theme: ?[]const u8 = null,
+paginate: ?u32 = null,
 allow_html: bool = false,
 options_toc: bool = false,
 
@@ -87,6 +89,8 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
         description,
         template,
         allow_html,
+        theme,
+        paginate,
         tags,
     } = .key;
     var slug: ?[]const u8 = null;
@@ -106,6 +110,11 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
 
     var date: ?[]const u8 = null;
     errdefer if (date) |f| allocator.free(f);
+
+    var theme: ?[]const u8 = null;
+    errdefer if (theme) |f| allocator.free(f);
+
+    var paginate: ?u32 = null;
 
     var allow_html: bool = false;
 
@@ -149,6 +158,10 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
                             next_scalar_expected = .template;
                         } else if (mem.eql(u8, value, "allow_html")) {
                             next_scalar_expected = .allow_html;
+                        } else if (mem.eql(u8, value, "theme")) {
+                            next_scalar_expected = .theme;
+                        } else if (mem.eql(u8, value, "paginate")) {
+                            next_scalar_expected = .paginate;
                         } else {
                             next_scalar_expected = .discard;
                         }
@@ -190,6 +203,14 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
                         description = try allocator.dupe(u8, value);
                         next_scalar_expected = .key;
                     },
+                    .theme => {
+                        theme = try allocator.dupe(u8, value);
+                        next_scalar_expected = .key;
+                    },
+                    .paginate => {
+                        paginate = try fmt.parseInt(u32, value, 10);
+                        next_scalar_expected = .key;
+                    },
                     .discard => {
                         next_scalar_expected = .key;
                     },
@@ -221,6 +242,8 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
         .allow_html = allow_html,
         .date = date,
         .description = description,
+        .theme = theme,
+        .paginate = paginate,
     };
 }
 
@@ -243,6 +266,9 @@ pub fn deinit(self: Data, allocator: mem.Allocator) void {
 
     if (self.description) |description| {
         allocator.free(description);
+    }
+    if (self.theme) |theme| {
+        allocator.free(theme);
     }
 }
 

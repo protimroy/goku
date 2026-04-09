@@ -27,6 +27,7 @@ pub const Command = union(enum) {
         },
         out_dir: []const u8 = "build",
         url_prefix: ?[]const u8 = null,
+        theme: ?[]const u8 = null,
     };
     pub const Init = struct {
         site_root: union(enum) {
@@ -41,6 +42,7 @@ pub const Command = union(enum) {
         },
         out_dir: []const u8 = "build",
         url_prefix: ?[]const u8 = null,
+        theme: ?[]const u8 = null,
     };
 
     /// Assumes the exe name has already been consumed in the iterator
@@ -64,6 +66,7 @@ pub const Command = union(enum) {
         var site_root: ?[]const u8 = null;
         var out_dir: ?[]const u8 = null;
         var url_prefix: ?[]const u8 = null;
+        var theme: ?[]const u8 = null;
 
         while (args.next()) |arg| {
             if (mem.eql(u8, arg, "-o")) {
@@ -72,6 +75,9 @@ pub const Command = union(enum) {
             } else if (mem.eql(u8, arg, "-p")) {
                 if (url_prefix != null) return error.TooManyArguments;
                 url_prefix = args.next() orelse return error.MissingUrlPrefix;
+            } else if (mem.eql(u8, arg, "-t")) {
+                if (theme != null) return error.TooManyArguments;
+                theme = args.next() orelse return error.MissingTheme;
             } else {
                 if (site_root != null) return error.TooManyArguments;
                 site_root = arg;
@@ -87,6 +93,7 @@ pub const Command = union(enum) {
         };
         if (out_dir) |path| build.out_dir = path;
         if (url_prefix) |prefix| build.url_prefix = prefix;
+        if (theme) |value| build.theme = value;
         return .{ .build = build };
     }
 
@@ -94,6 +101,7 @@ pub const Command = union(enum) {
         var site_root: ?[]const u8 = null;
         var out_dir: ?[]const u8 = null;
         var url_prefix: ?[]const u8 = null;
+        var theme: ?[]const u8 = null;
 
         while (args.next()) |arg| {
             if (mem.eql(u8, arg, "-o")) {
@@ -102,6 +110,9 @@ pub const Command = union(enum) {
             } else if (mem.eql(u8, arg, "-p")) {
                 if (url_prefix != null) return error.TooManyArguments;
                 url_prefix = args.next() orelse return error.MissingUrlPrefix;
+            } else if (mem.eql(u8, arg, "-t")) {
+                if (theme != null) return error.TooManyArguments;
+                theme = args.next() orelse return error.MissingTheme;
             } else {
                 if (site_root != null) return error.TooManyArguments;
                 site_root = arg;
@@ -116,6 +127,7 @@ pub const Command = union(enum) {
             .{ .relative = site_root.? } };
         if (out_dir) |path| preview.out_dir = path;
         if (url_prefix) |prefix| preview.url_prefix = prefix;
+        if (theme) |value| preview.theme = value;
         return .{ .preview = preview };
     }
 
@@ -154,7 +166,8 @@ const standard_help =
     \\    goku -h
     \\    goku init [<site_root>]
     \\    goku build <site_root> -o <out_dir> [-p <url_prefix>]
-    \\    goku preview <site_root> -o <out_dir> [-p <url_prefix>]
+    \\    goku preview <site_root> -o <out_dir> [-p <url_prefix>] [-t <theme>]
+    \\    goku build <site_root> -o <out_dir> [-p <url_prefix>] [-t <theme>]
     \\
 ;
 
