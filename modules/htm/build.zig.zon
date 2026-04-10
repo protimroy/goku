@@ -1,6 +1,7 @@
 .{
-    .name = "htm",
+    .name = .htm,
     .version = "0.0.0",
+    .fingerprint = 0xc1d5e29dea9b5f4e,
     .dependencies = .{},
     .paths = .{
         "build.zig",

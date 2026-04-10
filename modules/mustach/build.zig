@@ -38,15 +38,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "mustach",
-        .target = target,
-        .optimize = optimize,
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
     });
 
-    lib.linkLibC();
-
-    lib.addCSourceFiles(.{
+        lib.root_module.addCSourceFiles(.{
         .root = upstream.path("."),
         .files = source_files,
         .flags = compile_flags,
@@ -77,13 +79,15 @@ pub fn build(b: *std.Build) void {
     module.linkLibrary(lib);
 
     const @"test" = b.addTest(.{
-        .root_source_file = b.path("src/mustach.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mustach.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     @"test".root_module.addImport("c", c_mod);
-    @"test".linkLibrary(lib);
+        @"test".root_module.linkLibrary(lib);
 
     const test_step = b.step("test", "Run tests");
 

@@ -118,17 +118,16 @@ const HtmlSitemap = struct {
                 var fba = heap.FixedBufferAllocator.init(
                     &buffer,
                 );
-                var buf = std.ArrayList(u8).init(
-                    fba.allocator(),
-                );
+                var buf: std.Io.Writer.Allocating = .init(fba.allocator());
+                defer buf.deinit();
 
-                try buf.writer().print(
+                try buf.writer.print(
                     \\<li><a href="{s}{s}">{s}</a></li>
                 ,
                     .{ site.url_prefix orelse "", entry.slug, entry.title },
                 );
 
-                try writer.writeAll(buf.items);
+                try writer.writeAll(buf.written());
             }
         }
 
@@ -398,78 +397,56 @@ pub fn validate(self: Site) !void {
 pub fn write(
     self: *Site,
     part: enum { sitemap, assets, pages, component_assets },
-    out_dir: fs.Dir,
+    out_dir: std.Io.Dir,
+    fs_io: std.Io,
 ) !void {
     switch (part) {
-        .sitemap => try writeSitemap(self.*, out_dir),
-        .assets => try writeAssets(self, out_dir),
-        .pages => try writePages(self.*, out_dir),
-        .component_assets => try writeComponentAssets(self.*, out_dir),
+        .sitemap => try writeSitemap(self.*, out_dir, fs_io),
+        .assets => try writeAssets(self, out_dir, fs_io),
+        .pages => try writePages(self.*, out_dir, fs_io),
+        .component_assets => try writeComponentAssets(self.*, out_dir, fs_io),
     }
 }
 
-fn writeSitemap(self: Site, out_dir: fs.Dir) !void {
+fn writeSitemap(self: Site, out_dir: std.Io.Dir, fs_io: std.Io) !void {
     {
-        var file = try out_dir.createFile("_sitemap.html", .{});
-        defer file.close();
-
-        var file_buf = io.bufferedWriter(file.writer());
-        try HtmlSitemap.write(self, file_buf.writer());
-        try file_buf.flush();
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        try HtmlSitemap.write(self, &buf.writer);
+        try writeOutputFile(out_dir, fs_io, "_sitemap.html", buf.written());
     }
 
     {
-        var file = try out_dir.createFile("sitemap.xml", .{});
-        defer file.close();
-
-        var file_buf = io.bufferedWriter(file.writer());
-        try writeXmlSitemap(self, file_buf.writer());
-        try file_buf.flush();
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        try writeXmlSitemap(self, &buf.writer);
+        try writeOutputFile(out_dir, fs_io, "sitemap.xml", buf.written());
     }
 
     {
-        var file = try out_dir.createFile("atom.xml", .{});
-        defer file.close();
-
-        var file_buf = io.bufferedWriter(file.writer());
-        try writeAtomFeed(self, file_buf.writer());
-        try file_buf.flush();
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        try writeAtomFeed(self, &buf.writer);
+        try writeOutputFile(out_dir, fs_io, "atom.xml", buf.written());
     }
 
     {
-        var file = try out_dir.createFile("rss.xml", .{});
-        defer file.close();
-
-        var file_buf = io.bufferedWriter(file.writer());
-        try writeRssFeed(self, file_buf.writer());
-        try file_buf.flush();
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        try writeRssFeed(self, &buf.writer);
+        try writeOutputFile(out_dir, fs_io, "rss.xml", buf.written());
     }
 }
 
-fn writeAssets(self: *Site, out_dir: fs.Dir) !void {
-    {
-        var file = try out_dir.createFile(
-            "bulma.css",
-            .{},
-        );
-        defer file.close();
-        try file.writer().writeAll(bulma.min.css);
-    }
+fn writeAssets(self: *Site, out_dir: std.Io.Dir, fs_io: std.Io) !void {
+    try writeOutputFile(out_dir, fs_io, "bulma.css", bulma.min.css);
+    try writeOutputFile(out_dir, fs_io, "htmx.js", htmx.js);
 
-    {
-        var file = try out_dir.createFile(
-            "htmx.js",
-            .{},
-        );
-        defer file.close();
-        try file.writer().writeAll(htmx.js);
-    }
-
-    try self.asset_manifest.processSiteAssets(self.site_root, out_dir);
-    try writeThemeAssets(self.*, out_dir);
+    try self.asset_manifest.processSiteAssets(self.site_root, out_dir, fs_io);
+    try writeThemeAssets(self.*, out_dir, fs_io);
 }
 
-fn writeThemeAssets(self: Site, out_dir: fs.Dir) !void {
+fn writeThemeAssets(self: Site, out_dir: std.Io.Dir, fs_io: std.Io) !void {
     const allocator = self.allocator;
 
     for (self.themes.map.keys()) |theme_name| {
@@ -480,45 +457,49 @@ fn writeThemeAssets(self: Site, out_dir: fs.Dir) !void {
         defer allocator.free(walker_subpath);
 
         var walker = @import("source/filesystem.zig").walker(self.site_root, walker_subpath);
+        defer walker.deinit();
         while (walker.next() catch |err| switch (err) {
             error.CannotOpenDirectory => break,
             else => return err,
         }) |entry| {
             var source_path_buf: [fs.max_path_bytes]u8 = undefined;
             const source_abs = try entry.realpath(&source_path_buf);
-            const rel = try fs.path.relative(allocator, theme_root, source_abs);
+            const rel = try fs.path.relative(allocator, "", null, theme_root, source_abs);
             defer allocator.free(rel);
             if (mem.eql(u8, rel, "theme.yaml")) continue;
 
-            var file = try entry.openFile();
-            defer file.close();
-            const contents = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+            var file = try std.Io.Dir.openFileAbsolute(fs_io, source_abs, .{});
+            defer file.close(fs_io);
+            var reader_buffer: [4096]u8 = undefined;
+            var reader = file.reader(fs_io, &reader_buffer);
+            const contents = try reader.interface.allocRemaining(allocator, .limited(std.math.maxInt(usize)));
             defer allocator.free(contents);
 
             const out_rel = try fs.path.join(allocator, &.{ "theme", theme_name, rel });
             defer allocator.free(out_rel);
-            try writeOutputFile(out_dir, out_rel, contents);
+            try writeOutputFile(out_dir, fs_io, out_rel, contents);
         }
     }
 }
 
-fn writeOutputFile(out_dir: fs.Dir, rel_path: []const u8, contents: []const u8) !void {
+fn writeOutputFile(out_dir: std.Io.Dir, fs_io: std.Io, rel_path: []const u8, contents: []const u8) !void {
     if (fs.path.dirname(rel_path)) |parent| {
-        var dir = try out_dir.makeOpenPath(parent, .{});
-        defer dir.close();
-
-        var file = try dir.createFile(fs.path.basename(rel_path), .{});
-        defer file.close();
-        try file.writeAll(contents);
+        var dir = try out_dir.createDirPathOpen(fs_io, parent, .{});
+        defer dir.close(fs_io);
+        try dir.writeFile(fs_io, .{
+            .sub_path = fs.path.basename(rel_path),
+            .data = contents,
+        });
         return;
     }
 
-    var file = try out_dir.createFile(rel_path, .{});
-    defer file.close();
-    try file.writeAll(contents);
+    try out_dir.writeFile(fs_io, .{
+        .sub_path = rel_path,
+        .data = contents,
+    });
 }
 
-fn writePages(self: Site, out_dir: fs.Dir) !void {
+fn writePages(self: Site, out_dir: std.Io.Dir, fs_io: std.Io) !void {
     var it = try storage.Page.iterate(
         struct { slug: []const u8, filepath: []const u8 },
         self.allocator,
@@ -547,6 +528,7 @@ fn writePages(self: Site, out_dir: fs.Dir) !void {
                         entry.slug,
                         .wants_content,
                         out_dir,
+                        fs_io,
                         .{
                             .collection = collection,
                             .current_page = page_number,
@@ -567,16 +549,30 @@ fn writePages(self: Site, out_dir: fs.Dir) !void {
             entry.slug,
             .wants_content,
             out_dir,
+            fs_io,
             null,
         );
     }
 }
 
-fn readPageData(allocator: mem.Allocator, filepath: []const u8) !page.Data {
-    var file = try fs.openFileAbsolute(filepath, .{});
-    defer file.close();
+fn readAbsoluteFileAlloc(allocator: mem.Allocator, filepath: []const u8) ![]const u8 {
+    var threaded_io: std.Io.Threaded = .init(allocator, .{});
+    defer threaded_io.deinit();
 
-    const contents = try file.readToEndAlloc(allocator, std.math.maxInt(u32));
+    const fs_io = threaded_io.io();
+    var file = try std.Io.Dir.openFileAbsolute(fs_io, filepath, .{});
+    defer file.close(fs_io);
+
+    const stat = try file.stat(fs_io);
+    if (stat.size > math.maxInt(usize)) return error.FileTooBig;
+
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = file.reader(fs_io, &reader_buffer);
+    return try reader.interface.readAlloc(allocator, @intCast(stat.size));
+}
+
+fn readPageData(allocator: mem.Allocator, filepath: []const u8) !page.Data {
+    const contents = try readAbsoluteFileAlloc(allocator, filepath);
     const result = page.CodeFence.parse(contents) orelse return error.MalformedPageFile;
 
     const p: page.Page = .{
@@ -607,31 +603,31 @@ fn getCollectionCount(db: *Database, collection: []const u8) !u32 {
     return row.count;
 }
 
-fn writeComponentAssets(self: Site, out_dir: fs.Dir) !void {
+fn writeComponentAssets(self: Site, out_dir: std.Io.Dir, fs_io: std.Io) !void {
     {
-        var css_file = try out_dir.createFile("component.css", .{});
-        defer css_file.close();
-        const file_writer = css_file.writer();
+        var css_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer css_buf.deinit();
 
         log.info("Write component.css", .{});
 
         if (self.component_assets.style_map.count() > 0) {
             for (self.component_assets.style_map.values()) |chunk| {
-                try file_writer.print("{s}", .{chunk});
+                try css_buf.writer.print("{s}", .{chunk});
             }
         }
+
+        try writeOutputFile(out_dir, fs_io, "component.css", css_buf.written());
     }
 
     {
-        var js_file = try out_dir.createFile("component.js", .{});
-        defer js_file.close();
-        const file_writer = js_file.writer();
+        var js_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer js_buf.deinit();
 
         log.info("Write component.js", .{});
 
         if (self.component_assets.script_map.count() > 0) {
             for (self.component_assets.script_map.values()) |chunk| {
-                try file_writer.print(
+                try js_buf.writer.print(
                     \\;(function() {{
                     \\  'use strict';
                     \\{[script_body]s}
@@ -641,6 +637,8 @@ fn writeComponentAssets(self: Site, out_dir: fs.Dir) !void {
                 );
             }
         }
+
+        try writeOutputFile(out_dir, fs_io, "component.js", js_buf.written());
     }
 }
 
@@ -656,7 +654,8 @@ fn _render(
     filepath: []const u8,
     slug: []const u8,
     wants: DispatchWants,
-    out_dir: fs.Dir,
+    out_dir: std.Io.Dir,
+    fs_io: std.Io,
     pagination: ?Pagination,
 ) !void {
     switch (wants) {
@@ -665,18 +664,7 @@ fn _render(
     }
 
     // Read the file contents
-    const contents = contents: {
-        const in_file = try fs.openFileAbsolute(
-            filepath,
-            .{},
-        );
-        defer in_file.close();
-
-        break :contents try in_file.readToEndAlloc(
-            ally,
-            math.maxInt(u32),
-        );
-    };
+    const contents = try readAbsoluteFileAlloc(ally, filepath);
 
     // Parse the Page metadata
     const result = page.CodeFence.parse(contents) orelse
@@ -691,52 +679,29 @@ fn _render(
 
     const data = try p.data(ally);
 
-    // Create the out file
-    const file = file: {
-        var filename_buf = std.ArrayList(u8).init(ally);
-        defer filename_buf.deinit();
+    var output_path_buf = std.array_list.Managed(u8).init(ally);
+    defer output_path_buf.deinit();
 
-        const effective_slug = if (pagination) |page_ctx|
-            try paginationSlug(ally, page_ctx)
-        else
-            slug;
+    const effective_slug = if (pagination) |page_ctx|
+        try paginationSlug(ally, page_ctx)
+    else
+        slug;
 
-        // TODO the function accepts slug as an argument but we'll also have
-        // the slug after parsing the page metadata out. Is it redundant to
-        // accept the slug as a function argument?
-        debug.assert(effective_slug.len > 0);
-        debug.assert(effective_slug[0] == '/');
-        if (effective_slug.len > 1) {
-            debug.assert(!mem.endsWith(u8, effective_slug, "/"));
-            try filename_buf.appendSlice(effective_slug);
-        }
-        try filename_buf.appendSlice("/index.html");
+    debug.assert(effective_slug.len > 0);
+    debug.assert(effective_slug[0] == '/');
+    if (effective_slug.len > 1) {
+        debug.assert(!mem.endsWith(u8, effective_slug, "/"));
+        try output_path_buf.appendSlice(effective_slug);
+    }
+    try output_path_buf.appendSlice("/index.html");
 
-        make_parent: {
-            if (fs.path.dirname(filename_buf.items)) |parent| {
-                debug.assert(parent[0] == '/');
-                if (parent.len == 1) break :make_parent;
+    const output_rel_path = if (output_path_buf.items[0] == '/')
+        output_path_buf.items[1..]
+    else
+        output_path_buf.items;
 
-                var dir = try out_dir.makeOpenPath(
-                    parent[1..],
-                    .{},
-                );
-                defer dir.close();
-                break :file try dir.createFile(
-                    fs.path.basename(filename_buf.items),
-                    .{},
-                );
-            }
-        }
-
-        break :file try out_dir.createFile(
-            fs.path.basename(filename_buf.items),
-            .{},
-        );
-    };
-    defer file.close();
-
-    var html_buffer = io.bufferedWriter(file.writer());
+    var html_buf: std.Io.Writer.Allocating = .init(ally);
+    defer html_buf.deinit();
 
     // Load the template from the filesystem
     const template = template: {
@@ -746,16 +711,7 @@ fn _render(
                 &.{ site.site_root, "templates", t },
             );
 
-            var template_file = try fs.openFileAbsolute(
-                template_path,
-                .{},
-            );
-            defer template_file.close();
-
-            const template = try template_file.readToEndAlloc(
-                ally,
-                math.maxInt(u32),
-            );
+            const template = try readAbsoluteFileAlloc(ally, template_path);
             break :template template;
         }
 
@@ -774,10 +730,10 @@ fn _render(
         &site.asset_manifest,
         pagination,
         wants,
-        html_buffer.writer(),
+        &html_buf.writer,
     );
 
-    try html_buffer.flush();
+    try writeOutputFile(out_dir, fs_io, output_rel_path, html_buf.written());
 }
 
 // TODO actual needs don't reflect this initial design. Simplify.
@@ -819,7 +775,7 @@ fn unwrapBibliographyValue(raw: []const u8) []const u8 {
 
 fn normalizeBibliographyText(allocator: mem.Allocator, raw: []const u8) ![]const u8 {
     const value = unwrapBibliographyValue(raw);
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     errdefer buf.deinit();
 
     var last_was_space = true;
@@ -844,7 +800,7 @@ fn normalizeBibliographyText(allocator: mem.Allocator, raw: []const u8) ![]const
 
 fn normalizeBibtexAuthors(allocator: mem.Allocator, raw: []const u8) ![]const u8 {
     const value = unwrapBibliographyValue(raw);
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     errdefer buf.deinit();
 
     var authors = mem.splitSequence(u8, value, " and ");
@@ -864,7 +820,7 @@ fn normalizeBibtexAuthors(allocator: mem.Allocator, raw: []const u8) ![]const u8
     return try buf.toOwnedSlice();
 }
 
-fn appendBibliographySentence(buf: *std.ArrayList(u8), maybe_text: ?[]const u8) !void {
+fn appendBibliographySentence(buf: *std.array_list.Managed(u8), maybe_text: ?[]const u8) !void {
     if (maybe_text) |text| {
         const trimmed = mem.trim(u8, text, " \t\r\n");
         if (trimmed.len == 0) return;
@@ -876,7 +832,7 @@ fn appendBibliographySentence(buf: *std.ArrayList(u8), maybe_text: ?[]const u8) 
     }
 }
 
-fn appendBibliographyQuotedTitle(buf: *std.ArrayList(u8), maybe_text: ?[]const u8) !void {
+fn appendBibliographyQuotedTitle(buf: *std.array_list.Managed(u8), maybe_text: ?[]const u8) !void {
     if (maybe_text) |text| {
         const trimmed = mem.trim(u8, text, " \t\r\n");
         if (trimmed.len == 0) return;
@@ -890,7 +846,7 @@ fn appendBibliographyQuotedTitle(buf: *std.ArrayList(u8), maybe_text: ?[]const u
     }
 }
 
-fn appendBibliographyClause(buf: *std.ArrayList(u8), maybe_text: ?[]const u8, label: ?[]const u8) !void {
+fn appendBibliographyClause(buf: *std.array_list.Managed(u8), maybe_text: ?[]const u8, label: ?[]const u8) !void {
     if (maybe_text) |text| {
         const trimmed = mem.trim(u8, text, " \t\r\n");
         if (trimmed.len == 0) return;
@@ -903,7 +859,7 @@ fn appendBibliographyClause(buf: *std.ArrayList(u8), maybe_text: ?[]const u8, la
     }
 }
 
-fn appendBibliographyLabeledSentence(buf: *std.ArrayList(u8), label: []const u8, maybe_text: ?[]const u8) !void {
+fn appendBibliographyLabeledSentence(buf: *std.array_list.Managed(u8), label: []const u8, maybe_text: ?[]const u8) !void {
     if (maybe_text) |text| {
         const trimmed = mem.trim(u8, text, " \t\r\n");
         if (trimmed.len == 0) return;
@@ -928,13 +884,13 @@ fn formatBibliographyEntry(
     doi: ?[]const u8,
     url: ?[]const u8,
 ) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     errdefer buf.deinit();
 
     try appendBibliographySentence(&buf, authors);
     try appendBibliographyQuotedTitle(&buf, title);
 
-    var venue_buf = std.ArrayList(u8).init(allocator);
+    var venue_buf = std.array_list.Managed(u8).init(allocator);
     defer venue_buf.deinit();
     try appendBibliographyClause(&venue_buf, venue, null);
     try appendBibliographyClause(&venue_buf, volume, "vol. ");
@@ -1184,7 +1140,7 @@ fn jsonObjectAuthors(allocator: mem.Allocator, value: std.json.Value) !?[]const 
     const authors_value = value.object.get("author") orelse return null;
     if (authors_value != .array) return null;
 
-    var buf = std.ArrayList(u8).init(allocator);
+    var buf = std.array_list.Managed(u8).init(allocator);
     errdefer buf.deinit();
 
     for (authors_value.array.items, 0..) |author_value, index| {
@@ -1275,10 +1231,16 @@ fn loadBibliographyEntries(allocator: mem.Allocator, site_root: []const u8, bibl
     else
         try fs.path.join(allocator, &.{ site_root, bibliography_path });
 
-    var file = try fs.openFileAbsolute(path, .{});
-    defer file.close();
+    var threaded_io: std.Io.Threaded = .init(allocator, .{});
+    defer threaded_io.deinit();
 
-    const raw = try file.readToEndAlloc(allocator, math.maxInt(u32));
+    const fs_io = threaded_io.io();
+    var file = try std.Io.Dir.openFileAbsolute(fs_io, path, .{});
+    defer file.close(fs_io);
+
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = file.reader(fs_io, &reader_buffer);
+    const raw = try reader.interface.allocRemaining(allocator, .limited(math.maxInt(usize)));
     var entries = markdown.BibliographyEntries.init(allocator);
 
     const ext = fs.path.extension(path);
@@ -1316,17 +1278,9 @@ pub fn dispatch(site: *Site, slug: []const u8, writer: anytype, styles_writer: a
         const url_prefix = site.url_prefix orelse "";
 
         // Read the file contents
-        const contents = contents: {
-            const in_file = fs.openFileAbsolute(
-                filepath,
-                .{},
-            ) catch return DispatchError.ReadError;
-            defer in_file.close();
-
-            break :contents in_file.readToEndAlloc(
-                ally,
-                math.maxInt(u32),
-            ) catch return DispatchError.OOM;
+        const contents = readAbsoluteFileAlloc(ally, filepath) catch |err| switch (err) {
+            error.OutOfMemory => return DispatchError.OOM,
+            else => return DispatchError.ReadError,
         };
 
         // Parse the Page metadata
@@ -1359,16 +1313,10 @@ pub fn dispatch(site: *Site, slug: []const u8, writer: anytype, styles_writer: a
                             &.{ site_root, "templates", t },
                         ) catch return DispatchError.OOM;
 
-                        var template_file = fs.openFileAbsolute(
-                            template_path,
-                            .{},
-                        ) catch return DispatchError.ReadError;
-                        defer template_file.close();
-
-                        const template = template_file.readToEndAlloc(
-                            ally,
-                            math.maxInt(u32),
-                        ) catch return DispatchError.OOM;
+                        const template = readAbsoluteFileAlloc(ally, template_path) catch |err| switch (err) {
+                            error.OutOfMemory => return DispatchError.OOM,
+                            else => return DispatchError.ReadError,
+                        };
                         break :template template;
                     }
 
@@ -1443,7 +1391,7 @@ fn renderPage(
 
     const should_render_mustache = meta.allow_html or interactive.requires_mustache;
     const content = if (should_render_mustache) content: {
-        var buf = std.ArrayList(u8).init(allocator);
+        var buf: std.Io.Writer.Allocating = .init(allocator);
         defer buf.deinit();
 
         try mustache.renderStream(
@@ -1458,7 +1406,7 @@ fn renderPage(
                 .asset_manifest = asset_manifest,
                 .pagination = pagination,
             },
-            buf.writer(),
+            &buf.writer,
         );
         break :content try buf.toOwnedSlice();
     } else interactive.content;
@@ -1477,7 +1425,7 @@ fn renderPage(
     );
     defer rendered.deinit(allocator);
 
-    var content_buf = std.ArrayList(u8).init(allocator);
+    var content_buf = std.array_list.Managed(u8).init(allocator);
     defer content_buf.deinit();
     try content_buf.appendSlice(rendered.html);
 
@@ -1550,7 +1498,7 @@ const @"test" = struct {
 
         defer db.deinit();
 
-        var buf = std.ArrayList(u8).init(testing.allocator);
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
         defer buf.deinit();
 
         var component_assets = try ComponentAssets.init(testing.allocator, &db);
@@ -1571,10 +1519,10 @@ const @"test" = struct {
             &asset_manifest,
             null,
             .wants_content,
-            buf.writer(),
+            &buf.writer,
         );
 
-        try testing.expectEqualStrings(expected, buf.items);
+        try testing.expectEqualStrings(expected, buf.written());
     }
 };
 

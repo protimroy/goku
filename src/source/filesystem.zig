@@ -4,6 +4,7 @@ const heap = std.heap;
 const mem = std.mem;
 const std = @import("std");
 const testing = std.testing;
+const Io = std.Io;
 
 pub fn walker(root: []const u8, subpath: []const u8) WalkerType(.{ .max_dir_handles = 1024 }) {
     return .{ .root = root, .subpath = subpath };
@@ -16,165 +17,111 @@ pub const WalkerConfig = struct {
 // Creates a zero-allocation filesystem walker, to iterate over all files
 // in a directory, recursively.
 pub fn WalkerType(comptime config: WalkerConfig) type {
+    _ = config;
+
     return struct {
         root: []const u8,
         subpath: []const u8,
 
         done: bool = false,
-        dir_handle: ?fs.Dir = null,
-        dir_iterator: ?fs.Dir.Iterator = null,
-
-        // Can hold up to `max_dir_handles` directory handles
-        buf: [config.max_dir_handles * @sizeOf(fs.Dir)]u8 = undefined,
-        fba: heap.FixedBufferAllocator = undefined,
-        dir_queue: ?std.ArrayList(fs.Dir) = null,
+        threaded_io: ?Io.Threaded = null,
+        root_dir: ?Io.Dir = null,
+        walk_root: ?Io.Dir = null,
+        dir_walker: ?Io.Dir.Walker = null,
+        base_path: ?[]u8 = null,
 
         const Self = @This();
 
         pub const Entry = struct {
-            dir: fs.Dir,
+            base_path: []const u8,
             subpath: []const u8,
+            kind: Io.File.Kind,
 
             pub fn realpath(self: Entry, buf: []u8) ![]const u8 {
-                return try self.dir.realpath(self.subpath, buf);
-            }
-
-            pub fn openFile(self: Entry) !fs.File {
-                return try self.dir.openFile(self.subpath, .{});
+                if (self.subpath.len == 0) {
+                    return try std.fmt.bufPrint(buf, "{s}", .{self.base_path});
+                }
+                return try std.fmt.bufPrint(buf, "{s}/{s}", .{ self.base_path, self.subpath });
             }
         };
+
+        fn io(self: *Self) Io {
+            return self.threaded_io.?.io();
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.dir_walker) |*walker_impl| walker_impl.deinit();
+
+            if (self.threaded_io) |*threaded_io| {
+                const fs_io = threaded_io.io();
+                if (self.walk_root) |dir| dir.close(fs_io);
+                if (self.root_dir) |dir| dir.close(fs_io);
+                threaded_io.deinit();
+            }
+
+            if (self.base_path) |path| heap.page_allocator.free(path);
+        }
 
         pub fn next(self: *Self) !?Entry {
             if (self.done) return null;
 
-            try self.ensureBuffer();
-            try self.ensureHandle();
-            try self.ensureIterator();
+            try self.ensureWalker();
 
-            const file: ?Entry = file: {
-                if (try self.dir_iterator.?.next()) |entry| {
-                    if (entry.kind == .directory) {
-                        try self.dir_queue.?.append(try self.dir_handle.?.openDir(entry.name, .{ .iterate = true }));
-                        // temporary "just eat another one"
-                        // I would expect problems if I thought
-                        // it wouldn't be short-lived.
-                        break :file try self.next();
-                    } else {
-                        break :file .{ .dir = self.dir_handle.?, .subpath = entry.name };
-                    }
-                }
-
-                break :file null;
-            };
-
-            if (file) |f| return f;
-
-            if (self.dir_queue.?.pop()) |dir| {
-                self.dir_handle.?.close();
-                self.dir_handle = dir;
-                self.dir_iterator = null;
-
-                return try self.next();
+            const fs_io = self.io();
+            if (try self.dir_walker.?.next(fs_io)) |entry| {
+                return .{
+                    .base_path = self.base_path.?,
+                    .subpath = entry.path,
+                    .kind = entry.kind,
+                };
             }
 
             self.done = true;
             return null;
         }
 
-        fn ensureBuffer(self: *Self) !void {
+        fn ensureWalker(self: *Self) !void {
             debug.assert(!self.done);
+            if (self.dir_walker != null) return;
 
-            if (self.dir_queue == null) {
-                self.fba = heap.FixedBufferAllocator.init(&self.buf);
-                self.dir_queue = std.ArrayList(fs.Dir).init(self.fba.allocator());
+            self.threaded_io = .init(heap.page_allocator, .{});
+            errdefer {
+                self.threaded_io.?.deinit();
+                self.threaded_io = null;
             }
 
-            debug.assert(self.dir_queue != null);
+            const fs_io = self.io();
+            const root_dir = if (fs.path.isAbsolute(self.root))
+                Io.Dir.openDirAbsolute(fs_io, self.root, .{}) catch return error.CannotOpenDirectory
+            else
+                Io.Dir.cwd().openDir(fs_io, self.root, .{}) catch return error.CannotOpenDirectory;
+            errdefer root_dir.close(fs_io);
+
+            const walk_root = root_dir.openDir(fs_io, self.subpath, .{ .iterate = true }) catch return error.CannotOpenDirectory;
+            errdefer walk_root.close(fs_io);
+
+            self.base_path = try fs.path.join(heap.page_allocator, &.{ self.root, self.subpath });
+            self.root_dir = root_dir;
+            self.walk_root = walk_root;
+            self.dir_walker = try walk_root.walk(heap.page_allocator);
         }
 
-        pub const HandleError = error{CannotOpenDirectory};
-        fn ensureHandle(self: *Self) HandleError!void {
-            debug.assert(!self.done);
-
-            if (self.dir_handle == null) {
-                var root = if (fs.path.isAbsolute(self.root))
-                    fs.openDirAbsolute(
-                        self.root,
-                        .{},
-                    ) catch return HandleError.CannotOpenDirectory
-                else
-                    fs.cwd().openDir(
-                        self.root,
-                        .{},
-                    ) catch return HandleError.CannotOpenDirectory;
-                defer root.close();
-
-                self.dir_handle = root.openDir(
-                    self.subpath,
-                    .{ .iterate = true },
-                ) catch return HandleError.CannotOpenDirectory;
-            }
-
-            debug.assert(self.dir_handle != null);
-        }
-
-        fn ensureIterator(self: *Self) !void {
-            debug.assert(!self.done);
-            debug.assert(self.dir_handle != null);
-
-            if (self.dir_iterator == null) {
-                self.dir_iterator = self.dir_handle.?.iterate();
-            }
-
-            debug.assert(self.dir_iterator != null);
-        }
-
-        // TODO how should I test this?
         test next {
             var instance: Self = .{ .root = ".", .subpath = ".", .done = true };
+            defer instance.deinit();
 
             try testing.expectEqual(null, try instance.next());
         }
 
-        test ensureBuffer {
+        test ensureWalker {
             var instance: Self = .{ .root = ".", .subpath = "." };
+            defer instance.deinit();
 
-            try testing.expectEqual(null, instance.dir_queue);
+            try testing.expectEqual(null, instance.dir_walker);
 
-            try instance.ensureBuffer();
+            try instance.ensureWalker();
 
-            try testing.expect(instance.dir_queue != null);
-        }
-
-        test ensureHandle {
-            var instance: Self = .{
-                .root = ".",
-                .subpath = ".",
-            };
-
-            try testing.expectEqual(null, instance.dir_handle);
-
-            try instance.ensureHandle();
-
-            try testing.expect(instance.dir_handle != null);
-        }
-
-        test ensureIterator {
-            // TODO Is there a better way to provide an open, iterable directory handle in a test?
-            var dir_handle = try fs.cwd().openDir(".", .{ .iterate = true });
-            defer dir_handle.close();
-
-            var instance: Self = .{
-                .root = ".",
-                .subpath = ".",
-                .dir_handle = dir_handle,
-            };
-
-            try testing.expectEqual(null, instance.dir_iterator);
-
-            try instance.ensureIterator();
-
-            try testing.expect(instance.dir_iterator != null);
+            try testing.expect(instance.dir_walker != null);
         }
     };
 }

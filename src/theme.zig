@@ -1,5 +1,4 @@
 const c = @import("c");
-const fs = std.fs;
 const heap = std.heap;
 const mem = std.mem;
 const std = @import("std");
@@ -31,21 +30,25 @@ pub const Registry = struct {
     }
 
     pub fn loadSiteThemes(self: *Registry, site_root: []const u8, preferred_name: ?[]const u8) !void {
-        var root_dir = try fs.openDirAbsolute(site_root, .{ .iterate = true });
-        defer root_dir.close();
+        var threaded_io: std.Io.Threaded = .init(self.arena.allocator(), .{});
+        defer threaded_io.deinit();
+        const fs_io = threaded_io.io();
 
-        var themes_dir = root_dir.openDir("themes", .{ .iterate = true }) catch |err| switch (err) {
+        var root_dir = try std.Io.Dir.openDirAbsolute(fs_io, site_root, .{ .iterate = true });
+        defer root_dir.close(fs_io);
+
+        var themes_dir = root_dir.openDir(fs_io, "themes", .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
-        defer themes_dir.close();
+        defer themes_dir.close(fs_io);
 
         var it = themes_dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(fs_io)) |entry| {
             if (entry.kind != .directory) continue;
 
             const theme_name = try self.arena.allocator().dupe(u8, entry.name);
-            const theme = try loadThemeDirectory(self.arena.allocator(), themes_dir, entry.name, theme_name);
+            const theme = try loadThemeDirectory(self.arena.allocator(), themes_dir, fs_io, entry.name, theme_name);
             try self.map.put(self.arena.allocator(), theme.name, theme);
 
             if (self.default_name == null and mem.eql(u8, theme.name, "default")) {
@@ -72,11 +75,11 @@ pub const Registry = struct {
         return null;
     }
 
-    fn loadThemeDirectory(allocator: mem.Allocator, themes_dir: fs.Dir, dir_name: []const u8, fallback_name: []const u8) !Theme {
-        var dir = try themes_dir.openDir(dir_name, .{});
-        defer dir.close();
+    fn loadThemeDirectory(allocator: mem.Allocator, themes_dir: std.Io.Dir, fs_io: std.Io, dir_name: []const u8, fallback_name: []const u8) !Theme {
+        var dir = try themes_dir.openDir(fs_io, dir_name, .{});
+        defer dir.close(fs_io);
 
-        const theme_file = dir.readFileAlloc(allocator, "theme.yaml", std.math.maxInt(u32)) catch |err| switch (err) {
+        var file = dir.openFile(fs_io, "theme.yaml", .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 return .{
                     .name = fallback_name,
@@ -86,6 +89,11 @@ pub const Registry = struct {
             },
             else => return err,
         };
+        defer file.close(fs_io);
+
+        var reader_buffer: [4096]u8 = undefined;
+        var reader = file.reader(fs_io, &reader_buffer);
+        const theme_file = try reader.interface.allocRemaining(allocator, .limited(std.math.maxInt(usize)));
 
         return try fromYamlString(allocator, theme_file, fallback_name);
     }
@@ -106,9 +114,9 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, fallback_name:
     const ev_ptr: [*c]c.yaml_event_t = &ev;
 
     var name: ?[]const u8 = null;
-    var styles = std.ArrayList([]const u8).init(allocator);
+    var styles = std.array_list.Managed([]const u8).init(allocator);
     errdefer styles.deinit();
-    var scripts = std.ArrayList([]const u8).init(allocator);
+    var scripts = std.array_list.Managed([]const u8).init(allocator);
     errdefer scripts.deinit();
 
     var done = false;

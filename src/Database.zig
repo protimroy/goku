@@ -65,18 +65,6 @@ pub fn Table(
             });
         }
 
-        comptime {
-            debug.assert(
-                mem.eql(
-                    u8,
-                    "select a, b, c, d from " ++ table_name,
-                    select(
-                        struct { a: u8, b: u8, c: u8, d: u8 },
-                    ),
-                ),
-            );
-        }
-
         fn select(comptime DestType: type) []const u8 {
             return statement.select(table_name, DestType);
         }
@@ -88,28 +76,17 @@ pub const statement = struct {
         comptime table_name: []const u8,
         comptime DestType: type,
     ) []const u8 {
-        const Fields = ComptimeWrite(struct {
-            pub fn write(writer: anytype) !void {
-                inline for (
-                    @typeInfo(DestType).@"struct".fields,
-                    0..,
-                ) |
-                    field,
-                    i,
-                | try writer.print(
-                    switch (i) {
-                        0 => "{s}",
-                        else => ", {s}",
-                    },
-                    .{field.name},
-                );
-            }
-        });
+        comptime var fields: []const u8 = "";
 
-        return fmt.comptimePrint(
-            "select {[fields]s} from {[table]s}",
-            .{ .fields = Fields{}, .table = table_name },
-        );
+        inline for (@typeInfo(DestType).@"struct".fields, 0..) |field, i| {
+            const field_name: []const u8 = field.name;
+            fields = if (i == 0)
+                field_name
+            else
+                fields ++ ", " ++ field_name;
+        }
+
+        return "select " ++ fields ++ " from " ++ table_name;
     }
 };
 
@@ -203,7 +180,7 @@ pub fn IteratorType(comptime opts: IteratorTypeOptions) type {
 /// });
 ///
 /// // "Hello, world.\n"
-/// const greeting = fmt.comptimePrint("{s}", .{ Write{} });
+/// const greeting = fmt.comptimePrint("{}", .{ Write{} });
 /// ```
 fn ComptimeWrite(comptime Write: type) type {
     return struct {

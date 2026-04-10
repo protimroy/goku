@@ -1,0 +1,16 @@
+.{
+    .name = .quickjs,
+    .version = "0.0.0",
+    .fingerprint = 0x23b1522837e9b987,
+    .dependencies = .{
+        .upstream = .{
+            .url = "git+https://github.com/bellard/quickjs?ref=master#db3d3f09cdec7106d6e330aa1eb3fae50ed8fdc4",
+            .hash = "N-V-__8AALB5LAC1aa3snx3Tdv6CUckqf0fMbbaa6PSfN-N5",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}

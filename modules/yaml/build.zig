@@ -10,21 +10,23 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "yaml",
-        .target = target,
-        .optimize = optimize,
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
     });
 
-    lib.linkLibC();
-
-    lib.addCSourceFiles(.{
+        lib.root_module.addCSourceFiles(.{
         .root = upstream.path("src"),
         .files = source_files,
         .flags = compile_flags,
     });
 
-    lib.addConfigHeader(b.addConfigHeader(.{}, .{
+    lib.root_module.addConfigHeader(b.addConfigHeader(.{}, .{
         .YAML_VERSION_STRING = "0.2.5",
         .YAML_VERSION_MAJOR = 0,
         .YAML_VERSION_MINOR = 2,
@@ -32,9 +34,9 @@ pub fn build(b: *std.Build) void {
     }));
 
     // To access yaml_private.h
-    lib.addIncludePath(upstream.path("src"));
+    lib.root_module.addIncludePath(upstream.path("src"));
     // To access yaml.h
-    lib.addIncludePath(upstream.path("include"));
+    lib.root_module.addIncludePath(upstream.path("include"));
 
     lib.installHeadersDirectory(
         upstream.path("include"),

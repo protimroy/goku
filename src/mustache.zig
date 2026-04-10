@@ -5,7 +5,6 @@ const fmt = std.fmt;
 const fs = std.fs;
 const js = @import("js.zig");
 const heap = std.heap;
-const io = std.io;
 const log = std.log.scoped(.mustache);
 const htm = @import("htm");
 const vhtml = @import("vhtml");
@@ -24,17 +23,17 @@ pub fn renderStream(allocator: mem.Allocator, template: []const u8, context: any
     var arena = heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var mustache_writer = MustacheWriterType(@TypeOf(context)).init(
+    var mustache_writer = MustacheWriterType(@TypeOf(context), @TypeOf(writer)).init(
         arena.allocator(),
         context,
-        writer.any(),
+        writer,
     );
 
     try mustache_writer.write(template);
 }
 
 test renderStream {
-    var buf = std.ArrayList(u8).init(testing.allocator);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
     defer buf.deinit();
 
     const template = "{{title}}";
@@ -59,10 +58,16 @@ test renderStream {
                 .slug = "/foo",
             },
         },
-        buf.writer(),
+        &buf.writer,
     );
 
-    try testing.expectEqualStrings("foo", buf.items);
+    try testing.expectEqualStrings("foo", buf.written());
+}
+
+fn appendFmt(buf: *std.array_list.Managed(u8), comptime format: []const u8, args: anytype) !void {
+    const rendered = try fmt.allocPrint(buf.allocator, format, args);
+    defer buf.allocator.free(rendered);
+    try buf.appendSlice(rendered);
 }
 
 fn GetHandleType(comptime UserContext: type) type {
@@ -131,7 +136,7 @@ fn GetHandleType(comptime UserContext: type) type {
         }
 
         fn getCollectionsList(get_handle: *GetHandle, arena: mem.Allocator, collection: []const u8) ![]const u8 {
-            var list_buf = std.ArrayList(u8).init(arena);
+            var list_buf = std.array_list.Managed(u8).init(arena);
             defer list_buf.deinit();
 
             const pagination = getPagination(get_handle, collection);
@@ -171,7 +176,7 @@ fn GetHandleType(comptime UserContext: type) type {
 
             var num_items: u32 = 0;
             while (try it.nextAlloc(arena, .{})) |entry| {
-                try list_buf.writer().print(
+                try appendFmt(&list_buf,
                     \\<li>
                     \\<a href="{[site_root]s}{[slug]s}">
                     \\{[date]s} {[title]s}
@@ -267,9 +272,9 @@ fn GetHandleType(comptime UserContext: type) type {
         }
 
         fn getMeta(get_handle: *GetHandle, arena: mem.Allocator) ![]const u8 {
-            var buf: std.ArrayList(u8) = .init(arena);
+            var buf = std.array_list.Managed(u8).init(arena);
             errdefer buf.deinit();
-            try buf.writer().print(
+            try appendFmt(&buf,
                 \\<style>.meta-container {{ font-size: .7rem; }}</style>
                 \\<div class="table-container meta-container">
                 \\<table class="table">
@@ -281,12 +286,12 @@ fn GetHandleType(comptime UserContext: type) type {
 
             inline for (std.meta.fields(@TypeOf(get_handle.user_context.data))) |field| {
                 switch (field.type) {
-                    []const u8 => try buf.writer().print("<tr><th>{[name]s}</th><td>{[value]s}</td>", .{
+                    []const u8 => try appendFmt(&buf, "<tr><th>{[name]s}</th><td>{[value]s}</td>", .{
                         .name = field.name,
                         .value = @field(get_handle.user_context.data, field.name),
                     }),
                     ?[]const u8 => if (@field(get_handle.user_context.data, field.name)) |value| {
-                        try buf.writer().print("<tr><th>{[name]s}</th><td>{[value]s}</td>", .{
+                        try appendFmt(&buf, "<tr><th>{[name]s}</th><td>{[value]s}</td>", .{
                             .name = field.name,
                             .value = value,
                         });
@@ -295,7 +300,7 @@ fn GetHandleType(comptime UserContext: type) type {
                 }
             }
 
-            try buf.writer().print(
+            try appendFmt(&buf,
                 \\</tbody>
                 \\</table>
                 \\</div>
@@ -350,17 +355,17 @@ const UserError = enum(u8) {
     _,
 };
 
-fn MustacheWriterType(comptime UserContext: type) type {
+fn MustacheWriterType(comptime UserContext: type, comptime WriterType: type) type {
     return struct {
         arena: mem.Allocator,
         context: GetHandle,
-        writer: io.AnyWriter,
+        writer: WriterType,
         component_assets: *ComponentAssets,
 
         pub fn init(
             arena: mem.Allocator,
             user_context: UserContext,
-            writer: io.AnyWriter,
+            writer: WriterType,
         ) MustacheWriter {
             return .{
                 .arena = arena,
@@ -398,7 +403,7 @@ fn MustacheWriterType(comptime UserContext: type) type {
             .partial = partial,
         };
 
-        fn emit(ptr: ?*anyopaque, buf: [*c]const u8, len: usize, escaping: c_int, _: ?*c.FILE) callconv(.C) c_int {
+        fn emit(ptr: ?*anyopaque, buf: [*c]const u8, len: usize, escaping: c_int, _: ?*c.FILE) callconv(.c) c_int {
             debug.assert(ptr != null);
             // Trying to emit a value we could not get?
             debug.assert(buf != null);
@@ -416,7 +421,7 @@ fn MustacheWriterType(comptime UserContext: type) type {
         }
 
         // Calls the internal get implementation
-        fn get(ptr: ?*anyopaque, buf: [*c]const u8, sbuf: [*c]c.struct_mustach_sbuf) callconv(.C) c_int {
+        fn get(ptr: ?*anyopaque, buf: [*c]const u8, sbuf: [*c]c.struct_mustach_sbuf) callconv(.c) c_int {
             const key = mem.sliceTo(buf, 0);
 
             const value = Inner.get(fromPtr(ptr), key) catch |err| {
@@ -435,7 +440,7 @@ fn MustacheWriterType(comptime UserContext: type) type {
             return 0;
         }
 
-        fn enter(_: ?*anyopaque, buf: [*c]const u8) callconv(.C) c_int {
+        fn enter(_: ?*anyopaque, buf: [*c]const u8) callconv(.c) c_int {
             const key = mem.sliceTo(buf, 0);
             _ = key;
             // return 1 if entered, or 0 if not entered
@@ -443,15 +448,15 @@ fn MustacheWriterType(comptime UserContext: type) type {
             return 1;
         }
 
-        fn next(_: ?*anyopaque) callconv(.C) c_int {
+        fn next(_: ?*anyopaque) callconv(.c) c_int {
             return 0;
         }
 
-        fn leave(_: ?*anyopaque) callconv(.C) c_int {
+        fn leave(_: ?*anyopaque) callconv(.c) c_int {
             return 0;
         }
 
-        fn partial(_: ?*anyopaque, _: [*c]const u8, _: [*c]c.struct_mustach_sbuf) callconv(.C) c_int {
+        fn partial(_: ?*anyopaque, _: [*c]const u8, _: [*c]c.struct_mustach_sbuf) callconv(.c) c_int {
             return 0;
         }
 
@@ -556,7 +561,7 @@ fn MustacheWriterType(comptime UserContext: type) type {
                 }
 
                 fn escapeHtmlAttr(arena: mem.Allocator, value: []const u8) ![]const u8 {
-                    var buf = std.ArrayList(u8).init(arena);
+                    var buf = std.array_list.Managed(u8).init(arena);
                     for (value) |char| {
                         switch (char) {
                             '&' => try buf.appendSlice("&amp;"),
@@ -591,7 +596,7 @@ fn MustacheWriterType(comptime UserContext: type) type {
                     if (!mem.eql(u8, k, "page_assets.head")) return null;
                     const rendered = mw.context.renderedPage() orelse return "";
 
-                    var buf = std.ArrayList(u8).init(mw.arena);
+                    var buf = std.array_list.Managed(u8).init(mw.arena);
                     if (rendered.has_math) {
                         try buf.appendSlice("<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css\" integrity=\"sha384-hIoBPJpTUs74eN9mteA94ppIqhzyapMI2vlA38nSxrdbidK4USsfx8bVsgcuyo6S\" crossorigin=\"anonymous\">");
                     }
@@ -605,7 +610,7 @@ fn MustacheWriterType(comptime UserContext: type) type {
                     if (!mem.eql(u8, k, "page_assets.body")) return null;
                     const rendered = mw.context.renderedPage() orelse return "";
 
-                    var buf = std.ArrayList(u8).init(mw.arena);
+                    var buf = std.array_list.Managed(u8).init(mw.arena);
                     if (rendered.has_math) {
                         try buf.appendSlice("<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js\" crossorigin=\"anonymous\"></script><script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js\" crossorigin=\"anonymous\"></script><script>document.addEventListener('DOMContentLoaded', function () { if (window.renderMathInElement) { window.renderMathInElement(document.getElementById('content'), { delimiters: [{left: '\\\\(', right: '\\\\)', display: false}, {left: '\\\\[', right: '\\\\]', display: true}] }); } });</script>");
                     }
@@ -623,46 +628,46 @@ fn MustacheWriterType(comptime UserContext: type) type {
                     const escaped_description = try escapeHtmlAttr(mw.arena, fieldOrEmpty(mw.context.user_context.data, "description"));
                     const escaped_page_url = try escapeHtmlAttr(mw.arena, page_url);
 
-                    var buf = std.ArrayList(u8).init(mw.arena);
-                    try buf.writer().print("<link rel=\"canonical\" href=\"{s}\">", .{escaped_page_url});
+                    var buf = std.array_list.Managed(u8).init(mw.arena);
+                    try appendFmt(&buf, "<link rel=\"canonical\" href=\"{s}\">", .{escaped_page_url});
                     if (escaped_description.len > 0) {
-                        try buf.writer().print("<meta name=\"description\" content=\"{s}\">", .{escaped_description});
+                        try appendFmt(&buf, "<meta name=\"description\" content=\"{s}\">", .{escaped_description});
                     }
-                    try buf.writer().print("<meta property=\"og:title\" content=\"{s}\"><meta property=\"og:type\" content=\"article\"><meta property=\"og:url\" content=\"{s}\">", .{ escaped_title, escaped_page_url });
+                    try appendFmt(&buf, "<meta property=\"og:title\" content=\"{s}\"><meta property=\"og:type\" content=\"article\"><meta property=\"og:url\" content=\"{s}\">", .{ escaped_title, escaped_page_url });
                     if (escaped_description.len > 0) {
-                        try buf.writer().print("<meta property=\"og:description\" content=\"{s}\">", .{escaped_description});
-                        try buf.writer().print("<meta name=\"twitter:description\" content=\"{s}\">", .{escaped_description});
+                        try appendFmt(&buf, "<meta property=\"og:description\" content=\"{s}\">", .{escaped_description});
+                        try appendFmt(&buf, "<meta name=\"twitter:description\" content=\"{s}\">", .{escaped_description});
                     }
-                    try buf.writer().print("<meta name=\"twitter:card\" content=\"summary_large_image\"><meta name=\"twitter:title\" content=\"{s}\">", .{escaped_title});
+                    try appendFmt(&buf, "<meta name=\"twitter:card\" content=\"summary_large_image\"><meta name=\"twitter:title\" content=\"{s}\">", .{escaped_title});
                     if (@hasField(@TypeOf(mw.context.user_context.data), "image")) {
                         if (@field(mw.context.user_context.data, "image")) |image| {
                             const image_url = try normalizeUrl(mw, image);
                             const escaped_image_url = try escapeHtmlAttr(mw.arena, image_url);
-                            try buf.writer().print("<meta property=\"og:image\" content=\"{s}\"><meta name=\"twitter:image\" content=\"{s}\">", .{ escaped_image_url, escaped_image_url });
+                            try appendFmt(&buf, "<meta property=\"og:image\" content=\"{s}\"><meta name=\"twitter:image\" content=\"{s}\">", .{ escaped_image_url, escaped_image_url });
                         }
                     }
                     if (@hasField(@TypeOf(mw.context.user_context.data), "author")) {
                         if (@field(mw.context.user_context.data, "author")) |author| {
                             const escaped_author = try escapeHtmlAttr(mw.arena, author);
-                            try buf.writer().print("<meta name=\"author\" content=\"{s}\">", .{escaped_author});
+                            try appendFmt(&buf, "<meta name=\"author\" content=\"{s}\">", .{escaped_author});
                         }
                     }
                     if (@hasField(@TypeOf(mw.context.user_context.data), "date")) {
                         if (@field(mw.context.user_context.data, "date")) |date| {
                             const escaped_date = try escapeHtmlAttr(mw.arena, date);
-                            try buf.writer().print("<meta property=\"article:published_time\" content=\"{s}\">", .{escaped_date});
+                            try appendFmt(&buf, "<meta property=\"article:published_time\" content=\"{s}\">", .{escaped_date});
                         }
                     }
                     if (@hasField(@TypeOf(mw.context.user_context.data), "updated")) {
                         if (@field(mw.context.user_context.data, "updated")) |updated| {
                             const escaped_updated = try escapeHtmlAttr(mw.arena, updated);
-                            try buf.writer().print("<meta property=\"article:modified_time\" content=\"{s}\">", .{escaped_updated});
+                            try appendFmt(&buf, "<meta property=\"article:modified_time\" content=\"{s}\">", .{escaped_updated});
                         }
                     }
                     if (@hasField(@TypeOf(mw.context.user_context.data), "doi")) {
                         if (@field(mw.context.user_context.data, "doi")) |doi| {
                             const escaped_doi = try escapeHtmlAttr(mw.arena, doi);
-                            try buf.writer().print("<meta name=\"citation_doi\" content=\"{s}\">", .{escaped_doi});
+                            try appendFmt(&buf, "<meta name=\"citation_doi\" content=\"{s}\">", .{escaped_doi});
                         }
                     }
                     return try buf.toOwnedSlice();
@@ -699,15 +704,15 @@ fn MustacheWriterType(comptime UserContext: type) type {
                     const next_page = try mw.context.getCollectionNeighbor(mw.arena, .next);
                     if (prev == null and next_page == null) return "";
 
-                    var buf = std.ArrayList(u8).init(mw.arena);
+                    var buf = std.array_list.Managed(u8).init(mw.arena);
                     try buf.appendSlice("<nav class=\"level page-nav\">");
                     if (prev) |entry| {
-                        try buf.writer().print("<a class=\"level-left\" href=\"{s}{s}\">&larr; {s}</a>", .{ mw.context.user_context.site_root, entry.slug, entry.title });
+                        try appendFmt(&buf, "<a class=\"level-left\" href=\"{s}{s}\">&larr; {s}</a>", .{ mw.context.user_context.site_root, entry.slug, entry.title });
                     } else {
                         try buf.appendSlice("<span class=\"level-left\"></span>");
                     }
                     if (next_page) |entry| {
-                        try buf.writer().print("<a class=\"level-right\" href=\"{s}{s}\">{s} &rarr;</a>", .{ mw.context.user_context.site_root, entry.slug, entry.title });
+                        try appendFmt(&buf, "<a class=\"level-right\" href=\"{s}{s}\">{s} &rarr;</a>", .{ mw.context.user_context.site_root, entry.slug, entry.title });
                     } else {
                         try buf.appendSlice("<span class=\"level-right\"></span>");
                     }
@@ -771,27 +776,31 @@ fn MustacheWriterType(comptime UserContext: type) type {
                         .{ .name = component_src },
                     ) orelse return error.MissingComponent;
 
-                    var file = try fs.openFileAbsolute(row.filepath, .{});
-                    defer file.close();
+                    var threaded_io: std.Io.Threaded = .init(mw.arena, .{});
+                    defer threaded_io.deinit();
 
-                    var script_buf = std.ArrayList(u8).init(mw.arena);
-                    defer script_buf.deinit();
-                    try file.reader().readAllArrayList(&script_buf, math.maxInt(usize));
-                    const script = try script_buf.toOwnedSliceSentinel(0);
-                    defer mw.arena.free(script);
+                    const fs_io = threaded_io.io();
+                    var file = try std.Io.Dir.openFileAbsolute(fs_io, row.filepath, .{});
+                    defer file.close(fs_io);
+
+                    var reader_buffer: [4096]u8 = undefined;
+                    var reader = file.reader(fs_io, &reader_buffer);
+                    const script = try reader.interface.allocRemaining(mw.arena, .limited(math.maxInt(usize)));
+                    const script_z = try mw.arena.dupeZ(u8, script);
+                    defer mw.arena.free(script_z);
 
                     log.debug(
                         "render component ({s}) at src {s}",
                         .{ component_src, row.filepath },
                     );
 
-                    var buf = std.ArrayList(u8).init(mw.arena);
-                    errdefer buf.deinit();
+                    var buf: std.Io.Writer.Allocating = .init(mw.arena);
+                    defer buf.deinit();
 
                     renderComponent(
                         mw.arena,
-                        script,
-                        buf.writer(),
+                        script_z,
+                        &buf.writer,
                         mw.component_assets,
                         .{
                             .site_root = mw.context.user_context.site_root,
@@ -801,7 +810,7 @@ fn MustacheWriterType(comptime UserContext: type) type {
                         return err;
                     };
 
-                    if (buf.items.len == 0) {
+                    if (buf.written().len == 0) {
                         log.err("Component ({s}) did not render.", .{component_src});
                         return error.ComponentMustRender;
                     }
@@ -845,9 +854,9 @@ fn MustacheWriterType(comptime UserContext: type) type {
                 }
 
                 fn renderStyles(mw: *MustacheWriter, selected_theme: *const Theme) ![]const u8 {
-                    var buf = std.ArrayList(u8).init(mw.arena);
+                    var buf = std.array_list.Managed(u8).init(mw.arena);
                     for (selected_theme.styles) |style| {
-                        try buf.writer().print(
+                        try appendFmt(&buf,
                             "<link rel=\"stylesheet\" type=\"text/css\" href=\"{s}\" />"
                         ,
                             .{try themeAssetUrl(mw, selected_theme, style)},
@@ -857,9 +866,9 @@ fn MustacheWriterType(comptime UserContext: type) type {
                 }
 
                 fn renderScripts(mw: *MustacheWriter, selected_theme: *const Theme) ![]const u8 {
-                    var buf = std.ArrayList(u8).init(mw.arena);
+                    var buf = std.array_list.Managed(u8).init(mw.arena);
                     for (selected_theme.scripts) |script| {
-                        try buf.writer().print(
+                        try appendFmt(&buf,
                             "<script src=\"{s}\"></script>"
                         ,
                             .{try themeAssetUrl(mw, selected_theme, script)},
@@ -957,15 +966,15 @@ fn MustacheWriterType(comptime UserContext: type) type {
                     const pagination = currentPagination(mw) orelse return "";
                     if (pagination.totalPages() <= 1) return "";
 
-                    var buf = std.ArrayList(u8).init(mw.arena);
+                    var buf = std.array_list.Managed(u8).init(mw.arena);
                     try buf.appendSlice("<nav class=\"pagination\">");
 
                     if (pagination.current_page > 1) {
-                        try buf.writer().print("<a href=\"{s}\">Previous</a>", .{try pageUrl(mw, pagination.base_slug, pagination.current_page - 1)});
+                        try appendFmt(&buf, "<a href=\"{s}\">Previous</a>", .{try pageUrl(mw, pagination.base_slug, pagination.current_page - 1)});
                     }
-                    try buf.writer().print("<span>Page {d} of {d}</span>", .{ pagination.current_page, pagination.totalPages() });
+                    try appendFmt(&buf, "<span>Page {d} of {d}</span>", .{ pagination.current_page, pagination.totalPages() });
                     if (pagination.current_page < pagination.totalPages()) {
-                        try buf.writer().print("<a href=\"{s}\">Next</a>", .{try pageUrl(mw, pagination.base_slug, pagination.current_page + 1)});
+                        try appendFmt(&buf, "<a href=\"{s}\">Next</a>", .{try pageUrl(mw, pagination.base_slug, pagination.current_page + 1)});
                     }
 
                     try buf.appendSlice("</nav>");
@@ -1145,9 +1154,11 @@ fn renderComponent(
         else => {},
     }
 
-    const hacky_mod_src: [:0]const u8 = try fmt.allocPrintZ(allocator, "export const site_root = \"{[site_root]s}\";", .{ .site_root = model.site_root });
+    const hacky_mod_src = try fmt.allocPrint(allocator, "export const site_root = \"{[site_root]s}\";", .{ .site_root = model.site_root });
     defer allocator.free(hacky_mod_src);
-    const hacky_mod = c.JS_Eval(ctx, hacky_mod_src, hacky_mod_src.len, "site", c.JS_EVAL_TYPE_MODULE);
+    const hacky_mod_src_z = try allocator.dupeZ(u8, hacky_mod_src);
+    defer allocator.free(hacky_mod_src_z);
+    const hacky_mod = c.JS_Eval(ctx, hacky_mod_src_z, hacky_mod_src.len, "site", c.JS_EVAL_TYPE_MODULE);
     defer c.JS_FreeValue(ctx, hacky_mod);
 
     const hacky_mod_src2: [:0]const u8 =

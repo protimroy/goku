@@ -22,7 +22,7 @@ pub const Web = struct {
                 Web.HTML.Element.interactive_elements,
                 Web.HTML.Element.web_components,
             }) |namespace| {
-                for (@typeInfo(namespace).Struct.decls) |decl| {
+                for (@typeInfo(namespace).@"struct".decls) |decl| {
                     list = list ++ [_][]const u8{decl.name};
                 }
             }

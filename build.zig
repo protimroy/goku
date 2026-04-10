@@ -14,7 +14,6 @@ pub fn build(b: *std.Build) void {
     const build_steps = .{
         .check = b.step("check", "Check the Zig code"),
         .coverage = b.step("coverage", "Analyze code coverage"),
-        .docs = b.step("docs", "Generate source code docs"),
         .preview = b.step("preview", "Preview the site locally in dev mode"),
         .site = b.step("site", "Build the Goku site"),
         .@"test" = b.step("test", "Run unit tests"),
@@ -49,9 +48,11 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "goku",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     exe.root_module.addImport("c", c_mod);
     exe.root_module.addImport("sqlite", sqlite.module("sqlite"));
@@ -61,16 +62,18 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("httpz", httpz.module("httpz"));
     exe.root_module.addImport("htm", htm.module("htm"));
     exe.root_module.addImport("vhtml", vhtml.module("vhtml"));
-    exe.linkLibrary(sqlite.artifact("sqlite"));
+    exe.root_module.linkLibrary(sqlite.artifact("sqlite"));
     b.installArtifact(exe);
 
     const exe_unit_tests = b.addTest(.{
         // We provide a name to the unit tests so the generated
         // docs will use it for the namespace.
         .name = "goku",
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
         //.test_runner = b.dependency("custom-test-runner", .{}).path("src/test_runner.zig"),
     });
     exe_unit_tests.root_module.addImport("bulma", bulma.module("bulma"));
@@ -81,7 +84,7 @@ pub fn build(b: *std.Build) void {
     exe_unit_tests.root_module.addImport("vhtml", vhtml.module("vhtml"));
     exe_unit_tests.root_module.addImport("sqlite", sqlite.module("sqlite"));
     exe_unit_tests.root_module.addImport("httpz", httpz.module("httpz"));
-    exe_unit_tests.linkLibrary(sqlite.artifact("sqlite"));
+    exe_unit_tests.root_module.linkLibrary(sqlite.artifact("sqlite"));
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     build_steps.@"test".dependOn(&run_exe_unit_tests.step);
 
@@ -97,16 +100,18 @@ pub fn build(b: *std.Build) void {
 
     const exe_check = b.addExecutable(.{
         .name = "goku",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     exe_check.root_module.addImport("c", c_mod);
     exe_check.root_module.addImport("sqlite", sqlite.module("sqlite"));
     exe_check.root_module.addImport("lucide", lucide.module("lucide"));
     exe_check.root_module.addImport("bulma", bulma.module("bulma"));
     exe_check.root_module.addImport("htmx", htmx.module("htmx"));
-    exe_check.linkLibrary(sqlite.artifact("sqlite"));
+    exe_check.root_module.linkLibrary(sqlite.artifact("sqlite"));
     build_steps.check.dependOn(&exe_check.step);
 
     var this_dep_hack: std.Build.Dependency = .{ .builder = b };
@@ -117,17 +122,16 @@ pub fn build(b: *std.Build) void {
     }
     build_steps.site.dependOn(&build_site_cmd.step);
 
-    const docs = Docs.fromTests(exe_unit_tests);
-    build_steps.docs.dependOn(&docs.serve.step);
-
     const run_preview_cmd = Goku.preview(&this_dep_hack, b.path("site"), b.path("build"));
     build_steps.preview.dependOn(&run_preview_cmd.step);
 
     const copy_static = b.addExecutable(.{
         .name = "copy_static",
-        .root_source_file = b.path("src/copy_static.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/copy_static.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     b.installArtifact(copy_static);
 }

@@ -83,10 +83,10 @@ pub fn renderAlloc(allocator: mem.Allocator, markdown: []const u8, config: Rende
     const preprocessed = try preprocessSidenotes(allocator, with_directives);
     defer allocator.free(preprocessed);
 
-    var html_buf = std.ArrayList(u8).init(allocator);
-    errdefer html_buf.deinit();
+    var html_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer html_buf.deinit();
 
-    var parser = try Parser.init(allocator, html_buf.writer().any(), config.url_prefix, config.asset_manifest);
+    var parser = try Parser.init(allocator, &html_buf.writer, config.url_prefix, config.asset_manifest);
     defer parser.deinit();
 
     const result = c.md_parse(
@@ -116,7 +116,7 @@ pub fn preprocessInteractiveFigures(allocator: mem.Allocator, markdown: []const 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var output = std.ArrayList(u8).init(arena.allocator());
+    var output = std.array_list.Managed(u8).init(arena.allocator());
     var lines = mem.splitScalar(u8, markdown, '\n');
     var in_fence = false;
     var requires_mustache = false;
@@ -129,7 +129,7 @@ pub fn preprocessInteractiveFigures(allocator: mem.Allocator, markdown: []const 
             continue;
         }
 
-        const trimmed = mem.trimLeft(u8, line, " \t");
+        const trimmed = mem.trimStart(u8, line, " \t");
         if (!in_fence and mem.startsWith(u8, trimmed, ":::interactive")) {
             const header = mem.trim(u8, trimmed[":::interactive".len..], " \t\r");
             if (header.len == 0) {
@@ -142,7 +142,7 @@ pub fn preprocessInteractiveFigures(allocator: mem.Allocator, markdown: []const 
             const component_name = mem.trim(u8, header[0..first_space], " \t");
             const title = mem.trim(u8, header[first_space..], " \t");
 
-            var caption = std.ArrayList(u8).init(arena.allocator());
+            var caption = std.array_list.Managed(u8).init(arena.allocator());
             var found_close = false;
             while (lines.next()) |inner_line| {
                 if (mem.eql(u8, mem.trim(u8, inner_line, " \t\r"), ":::")) {
@@ -191,7 +191,13 @@ pub fn preprocessInteractiveFigures(allocator: mem.Allocator, markdown: []const 
     };
 }
 
-fn appendEscapedHtml(buf: *std.ArrayList(u8), text: []const u8) !void {
+fn appendFmt(buf: *std.array_list.Managed(u8), comptime format: []const u8, args: anytype) !void {
+    const rendered = try std.fmt.allocPrint(buf.allocator, format, args);
+    defer buf.allocator.free(rendered);
+    try buf.appendSlice(rendered);
+}
+
+fn appendEscapedHtml(buf: anytype, text: []const u8) !void {
     for (text) |char| {
         switch (char) {
             '&' => try buf.appendSlice("&amp;"),
@@ -204,7 +210,7 @@ fn appendEscapedHtml(buf: *std.ArrayList(u8), text: []const u8) !void {
 }
 
 fn isFenceDelimiter(line: []const u8) bool {
-    const trimmed = mem.trimLeft(u8, line, " \t");
+    const trimmed = mem.trimStart(u8, line, " \t");
     return mem.startsWith(u8, trimmed, "```") or mem.startsWith(u8, trimmed, "~~~");
 }
 
@@ -213,20 +219,20 @@ fn preprocessFootnotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
     defer arena.deinit();
 
     var definitions = std.StringHashMap([]const u8).init(arena.allocator());
-    var content = std.ArrayList(u8).init(arena.allocator());
+    var content = std.array_list.Managed(u8).init(arena.allocator());
     var current_id: ?[]const u8 = null;
-    var current_text = std.ArrayList(u8).init(arena.allocator());
+    var current_text = std.array_list.Managed(u8).init(arena.allocator());
 
     const Helpers = struct {
         fn flushDefinition(
             defs: *std.StringHashMap([]const u8),
             id: *?[]const u8,
-            text: *std.ArrayList(u8),
+            text: *std.array_list.Managed(u8),
         ) !void {
             if (id.*) |current| {
                 try defs.put(current, try text.toOwnedSlice());
                 id.* = null;
-                text.* = std.ArrayList(u8).init(text.allocator);
+                text.* = std.array_list.Managed(u8).init(text.allocator);
             }
         }
 
@@ -236,7 +242,7 @@ fn preprocessFootnotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
             if (closing + 1 >= line.len or line[closing + 1] != ':') return null;
             return .{
                 .id = line[2..closing],
-                .body = mem.trimLeft(u8, line[closing + 2 ..], " "),
+                .body = mem.trimStart(u8, line[closing + 2 ..], " "),
             };
         }
 
@@ -245,7 +251,7 @@ fn preprocessFootnotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
         }
 
         fn sanitizeId(arena_allocator: mem.Allocator, raw: []const u8) ![]const u8 {
-            var buf = std.ArrayList(u8).init(arena_allocator);
+            var buf = std.array_list.Managed(u8).init(arena_allocator);
             var last_dash = false;
             for (raw) |char| {
                 if (std.ascii.isAlphanumeric(char)) {
@@ -286,8 +292,8 @@ fn preprocessFootnotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
     try Helpers.flushDefinition(&definitions, &current_id, &current_text);
 
     var ref_numbers = std.StringHashMap(usize).init(arena.allocator());
-    var ordered_ids = std.ArrayList([]const u8).init(arena.allocator());
-    var output = std.ArrayList(u8).init(arena.allocator());
+    var ordered_ids = std.array_list.Managed([]const u8).init(arena.allocator());
+    var output = std.array_list.Managed(u8).init(arena.allocator());
 
     var index: usize = 0;
     while (index < content.items.len) {
@@ -301,7 +307,7 @@ fn preprocessFootnotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
                         try ordered_ids.append(raw_id);
                     }
                     const safe_id = try Helpers.sanitizeId(arena.allocator(), raw_id);
-                    try output.writer().print(
+                    try appendFmt(&output,
                         "<sup id=\"fnref:{s}\"><a href=\"#fn:{s}\" class=\"footnote-ref\">{d}</a></sup>",
                         .{ safe_id, safe_id, gop.value_ptr.* },
                     );
@@ -322,12 +328,12 @@ fn preprocessFootnotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
             const body = definitions.get(raw_id).?;
             var body_lines = mem.splitScalar(u8, body, '\n');
             const first_line = body_lines.next() orelse "";
-            try output.writer().print("{d}. <span id=\"fn:{s}\"></span> {s}", .{ ordinal + 1, safe_id, first_line });
+            try appendFmt(&output, "{d}. <span id=\"fn:{s}\"></span> {s}", .{ ordinal + 1, safe_id, first_line });
             while (body_lines.next()) |body_line| {
                 try output.appendSlice("\n    ");
                 try output.appendSlice(body_line);
             }
-            try output.writer().print(" [↩](#fnref:{s})\n", .{safe_id});
+            try appendFmt(&output, " [↩](#fnref:{s})\n", .{safe_id});
         }
     }
 
@@ -339,20 +345,20 @@ fn preprocessCitations(allocator: mem.Allocator, markdown: []const u8, config: R
     defer arena.deinit();
 
     var definitions = std.StringHashMap([]const u8).init(arena.allocator());
-    var content = std.ArrayList(u8).init(arena.allocator());
+    var content = std.array_list.Managed(u8).init(arena.allocator());
     var current_id: ?[]const u8 = null;
-    var current_text = std.ArrayList(u8).init(arena.allocator());
+    var current_text = std.array_list.Managed(u8).init(arena.allocator());
 
     const Helpers = struct {
         fn flushDefinition(
             defs: *std.StringHashMap([]const u8),
             id: *?[]const u8,
-            text: *std.ArrayList(u8),
+            text: *std.array_list.Managed(u8),
         ) !void {
             if (id.*) |current| {
                 try defs.put(current, try text.toOwnedSlice());
                 id.* = null;
-                text.* = std.ArrayList(u8).init(text.allocator);
+                text.* = std.array_list.Managed(u8).init(text.allocator);
             }
         }
 
@@ -362,7 +368,7 @@ fn preprocessCitations(allocator: mem.Allocator, markdown: []const u8, config: R
             if (closing + 1 >= line.len or line[closing + 1] != ':') return null;
             return .{
                 .id = line[2..closing],
-                .body = mem.trimLeft(u8, line[closing + 2 ..], " "),
+                .body = mem.trimStart(u8, line[closing + 2 ..], " "),
             };
         }
 
@@ -371,7 +377,7 @@ fn preprocessCitations(allocator: mem.Allocator, markdown: []const u8, config: R
         }
 
         fn sanitizeId(arena_allocator: mem.Allocator, raw: []const u8) ![]const u8 {
-            var buf = std.ArrayList(u8).init(arena_allocator);
+            var buf = std.array_list.Managed(u8).init(arena_allocator);
             var last_dash = false;
             for (raw) |char| {
                 if (std.ascii.isAlphanumeric(char)) {
@@ -387,7 +393,7 @@ fn preprocessCitations(allocator: mem.Allocator, markdown: []const u8, config: R
         }
 
         fn parseCitationIds(arena_allocator: mem.Allocator, body: []const u8) !?[][]const u8 {
-            var ids = std.ArrayList([]const u8).init(arena_allocator);
+            var ids = std.array_list.Managed([]const u8).init(arena_allocator);
             var splitter = mem.splitSequence(u8, body, ";");
             while (splitter.next()) |part| {
                 const trimmed = mem.trim(u8, part, " \n\t\r");
@@ -424,8 +430,8 @@ fn preprocessCitations(allocator: mem.Allocator, markdown: []const u8, config: R
     try Helpers.flushDefinition(&definitions, &current_id, &current_text);
 
     var ref_numbers = std.StringHashMap(usize).init(arena.allocator());
-    var ordered_ids = std.ArrayList([]const u8).init(arena.allocator());
-    var output = std.ArrayList(u8).init(arena.allocator());
+    var ordered_ids = std.array_list.Managed([]const u8).init(arena.allocator());
+    var output = std.array_list.Managed(u8).init(arena.allocator());
 
     var index: usize = 0;
     while (index < content.items.len) {
@@ -451,7 +457,7 @@ fn preprocessCitations(allocator: mem.Allocator, markdown: []const u8, config: R
                             }
                             const safe_id = try Helpers.sanitizeId(arena.allocator(), cite_id);
                             if (cite_index > 0) try output.appendSlice("; ");
-                            try output.writer().print(
+                            try appendFmt(&output,
                                 "<a href=\"#cite:{s}\" class=\"citation-ref\">{d}</a>",
                                 .{ safe_id, gop.value_ptr.* },
                             );
@@ -475,7 +481,7 @@ fn preprocessCitations(allocator: mem.Allocator, markdown: []const u8, config: R
             const body = definitions.get(raw_id) orelse config.bibliography_entries.?.get(raw_id).?;
             var body_lines = mem.splitScalar(u8, body, '\n');
             const first_line = body_lines.next() orelse "";
-            try output.writer().print("{d}. <span id=\"cite:{s}\"></span> {s}\n", .{ ordinal + 1, safe_id, first_line });
+            try appendFmt(&output, "{d}. <span id=\"cite:{s}\"></span> {s}\n", .{ ordinal + 1, safe_id, first_line });
             while (body_lines.next()) |body_line| {
                 try output.appendSlice("    ");
                 try output.appendSlice(body_line);
@@ -491,7 +497,7 @@ fn preprocessDirectives(allocator: mem.Allocator, markdown: []const u8, config: 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var output = std.ArrayList(u8).init(arena.allocator());
+    var output = std.array_list.Managed(u8).init(arena.allocator());
     var lines = mem.splitScalar(u8, markdown, '\n');
     var in_fence = false;
 
@@ -530,7 +536,7 @@ fn preprocessDirectives(allocator: mem.Allocator, markdown: []const u8, config: 
             continue;
         }
 
-        const trimmed = mem.trimLeft(u8, line, " \t");
+        const trimmed = mem.trimStart(u8, line, " \t");
         if (!in_fence and mem.startsWith(u8, trimmed, ":::")) {
             const header = mem.trim(u8, trimmed[3..], " \t\r");
             if (header.len == 0) {
@@ -548,7 +554,7 @@ fn preprocessDirectives(allocator: mem.Allocator, markdown: []const u8, config: 
             }
 
             const title = mem.trim(u8, header[first_space..], " \t");
-            var body = std.ArrayList(u8).init(arena.allocator());
+            var body = std.array_list.Managed(u8).init(arena.allocator());
             var found_close = false;
             while (lines.next()) |inner_line| {
                 if (mem.eql(u8, mem.trim(u8, inner_line, " \t\r"), ":::")) {
@@ -577,7 +583,7 @@ fn preprocessDirectives(allocator: mem.Allocator, markdown: []const u8, config: 
                 try output.appendSlice("</details>\n");
             } else if (mem.eql(u8, kind, "figure") or mem.eql(u8, kind, "margin-figure")) {
                 const class_name = if (mem.eql(u8, kind, "margin-figure")) "margin-figure" else "article-figure";
-                try output.writer().print("<figure class=\"{s}\">", .{class_name});
+                try appendFmt(&output, "<figure class=\"{s}\">", .{class_name});
                 try output.appendSlice(rendered_body.html);
                 if (title.len > 0) {
                     try output.appendSlice("<figcaption>");
@@ -586,7 +592,7 @@ fn preprocessDirectives(allocator: mem.Allocator, markdown: []const u8, config: 
                 }
                 try output.appendSlice("</figure>\n");
             } else {
-                try output.writer().print("<div class=\"admonition admonition-{s}\"><p class=\"admonition-title\">", .{kind});
+                try appendFmt(&output, "<div class=\"admonition admonition-{s}\"><p class=\"admonition-title\">", .{kind});
                 try appendEscapedHtml(&output, if (title.len > 0) title else Helpers.defaultTitle(kind));
                 try output.appendSlice("</p>");
                 try output.appendSlice(rendered_body.html);
@@ -607,7 +613,7 @@ fn preprocessSidenotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var output = std.ArrayList(u8).init(arena.allocator());
+    var output = std.array_list.Managed(u8).init(arena.allocator());
     var lines = mem.splitScalar(u8, markdown, '\n');
     var in_fence = false;
     var sidenote_number: usize = 0;
@@ -633,7 +639,7 @@ fn preprocessSidenotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
                 const end_index = mem.indexOfScalarPos(u8, line, index + 2, ']') orelse break;
                 sidenote_number += 1;
                 try output.appendSlice(line[last_index..index]);
-                try output.writer().print("<span class=\"sidenote\"><sup class=\"sidenote-number\">{d}</sup><span class=\"sidenote-body\">", .{sidenote_number});
+                try appendFmt(&output, "<span class=\"sidenote\"><sup class=\"sidenote-number\">{d}</sup><span class=\"sidenote-body\">", .{sidenote_number});
                 try appendEscapedHtml(&output, line[index + 2 .. end_index]);
                 try output.appendSlice("</span></span>");
                 index = end_index + 1;
@@ -652,14 +658,14 @@ fn preprocessSidenotes(allocator: mem.Allocator, markdown: []const u8) ![]const 
 
 const Parser = struct {
     allocator: mem.Allocator,
-    writer: std.io.AnyWriter,
+    writer: *std.Io.Writer,
     url_prefix: ?[]const u8,
     asset_manifest: ?*const assets.Manifest,
     image_nesting_level: u8 = 0,
     current_heading_level: ?u8 = null,
-    heading_output_buf: std.ArrayList(u8),
-    heading_text_buf: std.ArrayList(u8),
-    headings: std.ArrayList(Heading),
+    heading_output_buf: std.array_list.Managed(u8),
+    heading_text_buf: std.array_list.Managed(u8),
+    headings: std.array_list.Managed(Heading),
     heading_id_counts: std.StringHashMapUnmanaged(u32) = .empty,
     word_count: usize = 0,
     has_math: bool = false,
@@ -676,15 +682,15 @@ const Parser = struct {
         .syntax = null,
     },
 
-    fn init(allocator: mem.Allocator, writer: std.io.AnyWriter, url_prefix: ?[]const u8, asset_manifest: ?*const assets.Manifest) !Parser {
+    fn init(allocator: mem.Allocator, writer: *std.Io.Writer, url_prefix: ?[]const u8, asset_manifest: ?*const assets.Manifest) !Parser {
         return .{
             .allocator = allocator,
             .writer = writer,
             .url_prefix = url_prefix,
             .asset_manifest = asset_manifest,
-            .heading_output_buf = std.ArrayList(u8).init(allocator),
-            .heading_text_buf = std.ArrayList(u8).init(allocator),
-            .headings = std.ArrayList(Heading).init(allocator),
+            .heading_output_buf = std.array_list.Managed(u8).init(allocator),
+            .heading_text_buf = std.array_list.Managed(u8).init(allocator),
+            .headings = std.array_list.Managed(Heading).init(allocator),
         };
     }
 
@@ -766,7 +772,7 @@ const Parser = struct {
     }
 
     fn slugify(self: *Parser, text_buf: []const u8) ![]const u8 {
-        var slug_buf = std.ArrayList(u8).init(self.allocator);
+        var slug_buf = std.array_list.Managed(u8).init(self.allocator);
         errdefer slug_buf.deinit();
 
         var last_dash = false;
@@ -805,12 +811,12 @@ const Parser = struct {
     fn buildTocHtml(self: *Parser) ![]const u8 {
         if (self.headings.items.len == 0) return try self.allocator.dupe(u8, "");
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = std.array_list.Managed(u8).init(self.allocator);
         errdefer buf.deinit();
 
         try buf.appendSlice("<nav class=\"table-of-contents\"><p class=\"menu-label\">Contents</p><ul class=\"menu-list\">");
         for (self.headings.items) |heading| {
-            try buf.writer().print(
+            try appendFmt(&buf,
                 "<li class=\"toc-level-{d}\"><a href=\"#{s}\">{s}</a></li>",
                 .{ heading.level, heading.id, heading.text },
             );
@@ -819,13 +825,13 @@ const Parser = struct {
         return try buf.toOwnedSlice();
     }
 
-    fn debug_log(buf: [*c]const u8, userdata: ?*anyopaque) callconv(.C) void {
+    fn debug_log(buf: [*c]const u8, userdata: ?*anyopaque) callconv(.c) void {
         const self = fromPtr(userdata);
         const msg = mem.sliceTo(buf, 0);
         self.writer.print("{s}\n", .{msg}) catch @panic("Could not debug markdown parser");
     }
 
-    fn text(kind: c.MD_TEXTTYPE, buf: [*c]const c.MD_CHAR, len: c.MD_SIZE, userdata: ?*anyopaque) callconv(.C) c_int {
+    fn text(kind: c.MD_TEXTTYPE, buf: [*c]const c.MD_CHAR, len: c.MD_SIZE, userdata: ?*anyopaque) callconv(.c) c_int {
         const self = fromPtr(userdata);
         const out = buf[0..len];
 
@@ -864,7 +870,7 @@ const Parser = struct {
         return 0;
     }
 
-    fn renderEscaped(buf: []const u8, writer: std.io.AnyWriter) !void {
+    fn renderEscaped(buf: []const u8, writer: anytype) !void {
         for (buf) |byte| {
             switch (byte) {
                 '&' => try writer.writeAll("&amp;"),
@@ -886,7 +892,7 @@ const Parser = struct {
         }
     }
 
-    fn renderEscapedAttribute(buf: []const u8, writer: std.io.AnyWriter) !void {
+    fn renderEscapedAttribute(buf: []const u8, writer: anytype) !void {
         for (buf) |byte| {
             switch (byte) {
                 '&' => try writer.writeAll("&amp;"),
@@ -910,7 +916,7 @@ const Parser = struct {
         }
     }
 
-    fn writeAttribute(writer: std.io.AnyWriter, name: []const u8, value: []const u8) !void {
+    fn writeAttribute(writer: anytype, name: []const u8, value: []const u8) !void {
         try writer.print("{s}=\"", .{name});
         try renderEscapedAttribute(value, writer);
         try writer.writeAll("\" ");
@@ -922,7 +928,7 @@ const Parser = struct {
         try self.writeAll("\" ");
     }
 
-    fn enter_block(kind: c.MD_BLOCKTYPE, detail_ptr: ?*anyopaque, userdata: ?*anyopaque) callconv(.C) c_int {
+    fn enter_block(kind: c.MD_BLOCKTYPE, detail_ptr: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) c_int {
         const self = fromPtr(userdata);
 
         switch (MdBlockType.from(kind)) {
@@ -963,7 +969,7 @@ const Parser = struct {
         return 0;
     }
 
-    fn leave_block(kind: c.MD_BLOCKTYPE, detail_ptr: ?*anyopaque, userdata: ?*anyopaque) callconv(.C) c_int {
+    fn leave_block(kind: c.MD_BLOCKTYPE, detail_ptr: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) c_int {
         const self = fromPtr(userdata);
 
         switch (MdBlockType.from(kind)) {
@@ -1001,7 +1007,7 @@ const Parser = struct {
         return 0;
     }
 
-    fn enter_span(kind: c.MD_SPANTYPE, detail_ptr: ?*anyopaque, userdata: ?*anyopaque) callconv(.C) c_int {
+    fn enter_span(kind: c.MD_SPANTYPE, detail_ptr: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) c_int {
         const self = fromPtr(userdata);
         switch (kind) {
             c.MD_SPAN_A => {
@@ -1052,7 +1058,7 @@ const Parser = struct {
         return 0;
     }
 
-    fn leave_span(kind: c.MD_SPANTYPE, detail_ptr: ?*anyopaque, userdata: ?*anyopaque) callconv(.C) c_int {
+    fn leave_span(kind: c.MD_SPANTYPE, detail_ptr: ?*anyopaque, userdata: ?*anyopaque) callconv(.c) c_int {
         const self = fromPtr(userdata);
 
         switch (kind) {
@@ -1086,34 +1092,34 @@ const Parser = struct {
 };
 
 test "renderStream renders emphasis, deletion, underline, and math" {
-    var buf = std.ArrayList(u8).init(testing.allocator);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
     defer buf.deinit();
 
     try renderStream(
         "This has *emphasis*, ~~deletion~~, <u>html underline</u>, and $x^2 + y^2$.",
         .{},
-        buf.writer(),
+        &buf.writer,
     );
 
     try testing.expectEqualStrings(
         "<p>\nThis has <em>emphasis</em>, <del>deletion</del>, <u>html underline</u>, and \\(x^2 + y^2\\).</p>",
-        buf.items,
+        buf.written(),
     );
 }
 
 test "renderStream renders image alt text and figcaption" {
-    var buf = std.ArrayList(u8).init(testing.allocator);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
     defer buf.deinit();
 
     try renderStream(
         "![A sample image](/images/example.png \"An example caption\")",
         .{ .url_prefix = "/blog" },
-        buf.writer(),
+        &buf.writer,
     );
 
     try testing.expectEqualStrings(
         "<p>\n<figure><img title=\"An example caption\" src=\"/blog/images/example.png\" alt=\"A sample image\" /><figcaption>An example caption</figcaption></figure></p>",
-        buf.items,
+        buf.written(),
     );
 }
 

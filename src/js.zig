@@ -48,12 +48,12 @@ pub const MallocFunctions = struct {
         return @constCast(@ptrCast(&MallocFunctions._js_malloc_functions));
     }
 
-    fn malloc(state: [*c]c.JSMallocState, n: usize) callconv(.C) ?*anyopaque {
+    fn malloc(state: [*c]c.JSMallocState, n: usize) callconv(.c) ?*anyopaque {
         const self = fromState(state);
         return mallocInner(self, n) catch null;
     }
 
-    fn free(state: [*c]c.JSMallocState, ptr: ?*anyopaque) callconv(.C) void {
+    fn free(state: [*c]c.JSMallocState, ptr: ?*anyopaque) callconv(.c) void {
         if (ptr == null) return;
         const self = fromState(state);
 
@@ -62,7 +62,7 @@ pub const MallocFunctions = struct {
         };
     }
 
-    fn realloc(state: [*c]c.JSMallocState, ptr: ?*anyopaque, n: usize) callconv(.C) ?*anyopaque {
+    fn realloc(state: [*c]c.JSMallocState, ptr: ?*anyopaque, n: usize) callconv(.c) ?*anyopaque {
         if (ptr == null) return malloc(state, n);
 
         const self = fromState(state);
@@ -79,7 +79,7 @@ pub const MallocFunctions = struct {
     // the allocated slice in the AllocMap, therefore we cannot determine
     // the usable size.
     // This function is effectively a no-op; it always returns 0.
-    fn malloc_usable_size(_: ?*const anyopaque) callconv(.C) usize {
+    fn malloc_usable_size(_: ?*const anyopaque) callconv(.c) usize {
         return 0;
     }
 
@@ -171,13 +171,13 @@ test "provide print" {
     // Define the module that will provide the import.
     {
         const mod_source = struct {
-            fn init(_ctx: ?*c.JSContext, m: ?*c.JSModuleDef) callconv(.C) c_int {
+            fn init(_ctx: ?*c.JSContext, m: ?*c.JSModuleDef) callconv(.c) c_int {
                 const func = c.JS_NewCFunction(_ctx, print, "print", 1);
                 _ = c.JS_SetModuleExport(_ctx, m, "print", func);
                 return 0;
             }
 
-            fn print(_ctx: ?*c.JSContext, this: c.JSValueConst, argc: c_int, argv: ?*c.JSValueConst) callconv(.C) c.JSValue {
+            fn print(_ctx: ?*c.JSContext, this: c.JSValueConst, argc: c_int, argv: ?*c.JSValueConst) callconv(.c) c.JSValue {
                 _ = this;
                 debug.assert(argc == 1);
 

@@ -1,6 +1,7 @@
 .{
-    .name = "vhtml",
+    .name = .vhtml,
     .version = "0.0.0",
+    .fingerprint = 0x898dc58bd3270430,
     .dependencies = .{},
     .paths = .{
         "build.zig",

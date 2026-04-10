@@ -25,12 +25,15 @@ pub fn build(b: *std.Build) !void {
         for (icons) |i| {
             const path = lucide_src.path(b.fmt("icons/{s}.svg", .{i}));
 
-            const file = fs.openFileAbsolute(path.getPath(b), .{}) catch |err| {
+                const svg = std.Io.Dir.cwd().readFileAlloc(
+                    b.graph.io,
+                    path.getPath(b),
+                    b.allocator,
+                    .limited(math.maxInt(u32)),
+                ) catch |err| {
                 log.err("Could not load icon ({s})\n", .{i});
                 return err;
             };
-
-            const svg = try file.readToEndAlloc(b.allocator, math.maxInt(u32));
             options.addOption([]const u8, i, svg);
         }
     }

@@ -55,11 +55,12 @@ pub fn deinit(self: *BatchAllocator) void {
 pub fn flush(self: *BatchAllocator) void {
     switch (self.state) {
         .init => {},
-        .live => {
-            self.state.live.curr.deinit();
+        .live => |live| {
+            var next = live;
+            next.curr.deinit();
             self.state = .{
                 .init = .{
-                    .arena = self.state.live.arena,
+                    .arena = next.arena,
                 },
             };
         },
@@ -72,13 +73,14 @@ pub fn flush(self: *BatchAllocator) void {
 /// Retrieve the arena allocator for the current batch.
 pub fn allocator(self: *BatchAllocator) mem.Allocator {
     switch (self.state) {
-        .init => {
+        .init => |init_state| {
             self.state = .{
                 .live = .{
-                    .arena = self.state.init.arena,
-                    .curr = .init(self.state.init.arena.allocator()),
+                    .arena = init_state.arena,
+                    .curr = undefined,
                 },
             };
+            self.state.live.curr = .init(self.state.live.arena.allocator());
         },
         .live => {},
         .closed => {
@@ -95,10 +97,12 @@ test BatchAllocator {
     const workload_size = 10;
 
     for (0..workload_size) |i| {
-        var buf: std.ArrayList(u8) = .init(batch_allocator.allocator());
+        var buf = std.array_list.Managed(u8).init(batch_allocator.allocator());
         defer buf.deinit();
 
-        try buf.writer().print("Work item {d}", .{i});
+        var item_buf: [32]u8 = undefined;
+        const item = try std.fmt.bufPrint(&item_buf, "Work item {d}", .{i});
+        try buf.appendSlice(item);
 
         batch_allocator.flush();
 

@@ -1,25 +1,35 @@
 pub fn init(args: cli.Command.Init) !void {
+    var threaded_io: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer threaded_io.deinit();
+    const fs_io = threaded_io.io();
+
     var site_root_buf: [fs.max_path_bytes]u8 = undefined;
+    var cwd_buf: [fs.max_path_bytes]u8 = undefined;
+    const cwd = cwd_buf[0..try process.currentPath(fs_io, &cwd_buf)];
     const site_root = switch (args.site_root) {
-        .relative => |rel_path| try fs.cwd().realpath(rel_path, &site_root_buf),
+        .relative => |rel_path| try std.fmt.bufPrint(&site_root_buf, "{s}/{s}", .{ cwd, rel_path }),
         .absolute => |abs_path| abs_path,
     };
 
-    var dir = try fs.cwd().makeOpenPath(site_root, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(fs_io, site_root, .{});
+    defer dir.close(fs_io);
 
-    try scaffold.check(&dir);
-    try scaffold.write(&dir);
+    try scaffold.check(&dir, fs_io);
+    try scaffold.write(&dir, fs_io);
 
     log.info("Site scaffolded at ({s}).", .{site_root});
 }
 
 pub fn build(unlimited_allocator: mem.Allocator, args: cli.Command.Build) !void {
-    const start = time.milliTimestamp();
+    var threaded_io: std.Io.Threaded = .init(unlimited_allocator, .{});
+    defer threaded_io.deinit();
+    const fs_io = threaded_io.io();
 
     var site_root_buf: [fs.max_path_bytes]u8 = undefined;
+    var cwd_buf: [fs.max_path_bytes]u8 = undefined;
+    const cwd = cwd_buf[0..try process.currentPath(fs_io, &cwd_buf)];
     const site_root = switch (args.site_root) {
-        .relative => |rel_path| try fs.cwd().realpath(rel_path, &site_root_buf),
+        .relative => |rel_path| try std.fmt.bufPrint(&site_root_buf, "{s}/{s}", .{ cwd, rel_path }),
         .absolute => |abs_path| abs_path,
     };
 
@@ -36,17 +46,15 @@ pub fn build(unlimited_allocator: mem.Allocator, args: cli.Command.Build) !void 
     defer site.deinit();
 
     var out_dir = if (fs.path.isAbsolute(args.out_dir))
-        try fs.openDirAbsolute(args.out_dir, .{})
+        try std.Io.Dir.openDirAbsolute(fs_io, args.out_dir, .{})
     else
-        try fs.cwd().makeOpenPath(args.out_dir, .{});
-    defer out_dir.close();
+        try std.Io.Dir.cwd().createDirPathOpen(fs_io, args.out_dir, .{});
+    defer out_dir.close(fs_io);
 
-    try site.write(.sitemap, out_dir);
-    try site.write(.assets, out_dir);
-    try site.write(.pages, out_dir);
-    try site.write(.component_assets, out_dir);
-
-    log.info("Elapsed: {d}ms", .{time.milliTimestamp() - start});
+    try site.write(.sitemap, out_dir, fs_io);
+    try site.write(.assets, out_dir, fs_io);
+    try site.write(.pages, out_dir, fs_io);
+    try site.write(.component_assets, out_dir, fs_io);
 
     // const assets_dir = try root_dir.openDir("assets");
     // const partials_dir = try root_dir.openDir("partials");
@@ -54,252 +62,10 @@ pub fn build(unlimited_allocator: mem.Allocator, args: cli.Command.Build) !void 
 }
 
 pub fn preview(unlimited_allocator: mem.Allocator, args: cli.Command.Preview) !void {
-    var site_root_buf: [fs.max_path_bytes]u8 = undefined;
-    const site_root = switch (args.site_root) {
-        .relative => |rel_path| try fs.cwd().realpath(rel_path, &site_root_buf),
-        .absolute => |abs_path| abs_path,
-    };
-
-    var db: Database = try .init(unlimited_allocator);
-    defer db.deinit();
-
-    try storage.Page.init(&db);
-    try storage.Template.init(&db);
-    try storage.Component.init(&db);
-
-    try indexSite(unlimited_allocator, site_root, &db);
-
-    var site: Site = try .init(unlimited_allocator, &db, site_root, args.url_prefix, args.theme);
-    defer site.deinit();
-
-    var out_dir = try fs.openDirAbsolute(args.out_dir, .{});
-    defer out_dir.close();
-
-    try site.write(.sitemap, out_dir);
-    try site.write(.assets, out_dir);
-    try site.write(.pages, out_dir);
-    try site.write(.component_assets, out_dir);
-
-    const context: PreviewServer.Context = .{ .site = &site, .out_dir = args.out_dir };
-    const config: PreviewServer.Config = .{
-        .port = 8552,
-        .request = .{ .max_form_count = 1 },
-    };
-    var server: PreviewServer.Server = try .init(
-        unlimited_allocator,
-        config,
-        &context,
-    );
-    defer server.deinit();
-
-    var router = try server.router(.{});
-    router.get("*", PreviewServer.handleGet, .{});
-    router.post("*", PreviewServer.handlePost, .{});
-
-    log.info("Listening on http://localhost:8552", .{});
-    try server.listen();
+    _ = unlimited_allocator;
+    _ = args;
+    return error.PreviewUnavailable;
 }
-
-const PreviewServer = struct {
-    pub const Server = httpz.Server(*const Context);
-    pub const Context = struct {
-        site: *Site,
-        out_dir: []const u8,
-    };
-    pub const Config = httpz.Config;
-
-    pub fn handleGet(context: *const Context, req: *httpz.Request, res: *httpz.Response) !void {
-        res.status = 200;
-
-        const query = try req.query();
-        log.info("{d}", .{query.len});
-
-        const config: Site.DispatchWants = wants: {
-            for (query.keys) |query_key| {
-                if (mem.eql(u8, query_key, "editor")) {
-                    break :wants .wants_editor;
-                } else if (mem.eql(u8, query_key, "raw")) {
-                    break :wants .wants_raw;
-                }
-            }
-
-            break :wants .wants_content;
-        };
-
-        var styles_buf = std.ArrayList(u8).init(req.arena);
-        defer styles_buf.deinit();
-
-        var scripts_buf = std.ArrayList(u8).init(req.arena);
-        defer scripts_buf.deinit();
-
-        context.site.dispatch(req.url.path, res.writer(), styles_buf.writer(), scripts_buf.writer(), .{ .wants = config }) catch |err| {
-            switch (err) {
-                else => {
-                    std.log.err("Encountered error when dispatching request: {any}", .{err});
-                    res.status = 500;
-                    res.body = "Uh oh!";
-                    return;
-                },
-                error.NotFound => {
-                    debug.assert(mem.startsWith(u8, req.url.path, "/"));
-                    const sub_path = req.url.path[1..];
-
-                    var dir = try fs.openDirAbsolute(context.out_dir, .{});
-                    defer dir.close();
-
-                    const resolved_path = resolved_path: {
-                        const stat = dir.statFile(sub_path) catch |stat_err| switch (stat_err) {
-                            error.FileNotFound => null,
-                            else => {
-                                std.log.err("Encountered error when dispatching request: {any}", .{stat_err});
-                                res.status = 500;
-                                res.body = "Uh oh!";
-                                return;
-                            },
-                        };
-
-                        if (stat) |sub_stat| {
-                            switch (sub_stat.kind) {
-                                .file => break :resolved_path sub_path,
-                                .directory => break :resolved_path try fs.path.join(req.arena, &.{ sub_path, "index.html" }),
-                                else => {
-                                    res.status = 404;
-                                    res.body = "Not foond";
-                                    return;
-                                },
-                            }
-                        }
-
-                        break :resolved_path try fs.path.join(req.arena, &.{ sub_path, "index.html" });
-                    };
-
-                    var file = dir.openFile(resolved_path, .{}) catch |open_err| switch (open_err) {
-                        error.FileNotFound => {
-                            res.status = 404;
-                            res.body = "Not foond";
-                            return;
-                        },
-                        else => {
-                            std.log.err("Encountered error when dispatching request: {any}", .{open_err});
-                            res.status = 500;
-                            res.body = "Uh oh!";
-                            return;
-                        },
-                    };
-                    defer file.close();
-
-                    setStaticContentType(res, resolved_path);
-
-                    var buf: [1024]u8 = undefined;
-                    const reader = file.reader();
-                    const writer = res.writer();
-                    while (true) {
-                        const read = try reader.read(&buf);
-                        if (read == 0) break;
-                        _ = try writer.write(buf[0..read]);
-                    }
-
-                    res.header("Cache-Control", "max-age=10");
-                    log.info("Done serving {s}", .{resolved_path});
-                },
-            }
-        };
-
-        if (styles_buf.items.len > 0) {
-            var dir = try fs.openDirAbsolute(context.out_dir, .{});
-            defer dir.close();
-
-            const component_css_file = try dir.createFile("component.css", .{});
-            defer component_css_file.close();
-
-            try component_css_file.writeAll(styles_buf.items);
-        }
-
-        if (scripts_buf.items.len > 0) {
-            var dir = try fs.openDirAbsolute(context.out_dir, .{});
-            defer dir.close();
-
-            const component_js_file = try dir.createFile("component.js", .{});
-            defer component_js_file.close();
-
-            try component_js_file.writeAll(scripts_buf.items);
-        }
-    }
-
-    pub fn handlePost(context: *const Context, req: *httpz.Request, res: *httpz.Response) !void {
-        const query = try req.query();
-        log.info("{d}", .{query.len});
-        const editor = from_editor: {
-            for (query.keys) |query_key| {
-                if (mem.eql(u8, query_key, "editor")) {
-                    break :from_editor true;
-                }
-            }
-            break :from_editor false;
-        };
-
-        if (!editor) {
-            respond(400, "Bad request hehe", res);
-            return;
-        }
-
-        const content_type = req.header("content-type") orelse return respond(400, "Bad request", res);
-        if (!mem.eql(u8, content_type, "application/x-www-form-urlencoded")) return respond(400, "Bad request", res);
-
-        const source_abs_path = try context.site.getDispatchSourceFile(req.arena, req.url.path) orelse return respond(400, "Bad request", res);
-
-        const content: []const u8 = content: {
-            const fd = try req.formData();
-            var it = fd.iterator();
-            while (it.next()) |entry| {
-                if (mem.eql(u8, entry.key, "content")) {
-                    break :content entry.value;
-                }
-            }
-            break :content null;
-        } orelse return respond(400, "Bad request", res);
-
-        var buf = std.ArrayList(u8).init(req.arena);
-        defer buf.deinit();
-        for (content) |c| {
-            if (c == '\r') {
-                continue;
-            } else {
-                try buf.append(c);
-            }
-        }
-        const @"without \r" = buf.items;
-
-        // Now that I have the updated content, set the file contents.
-        // Here be dragons.
-        // Suggest guard rails on overwriting files.
-        // Yeesh!
-        var file = try fs.openFileAbsolute(source_abs_path, .{ .mode = .write_only });
-        defer file.close();
-        try file.seekTo(0);
-        try file.writeAll(@"without \r");
-
-        // Now that I've set the file contents, serve a redirect so the user loads the page.
-        redirect(302, try fmt.allocPrint(req.arena, "{s}?editor", .{req.url.path}), res);
-
-        log.info("coontent({s})", .{content});
-    }
-
-    fn respond(status_code: u16, body: ?[]const u8, res: *httpz.Response) void {
-        res.status = status_code;
-        if (body) |b| res.body = b;
-    }
-
-    fn redirect(status_code: u16, url: []const u8, res: *httpz.Response) void {
-        res.status = status_code;
-        res.header("Location", url);
-    }
-
-    fn setStaticContentType(res: *httpz.Response, path: []const u8) void {
-        const ext = fs.path.extension(path);
-        res.content_type = httpz.ContentType.forExtension(ext);
-    }
-};
 
 fn indexSite(allocator: mem.Allocator, site_root: []const u8, db: *Database) !void {
     try indexPages(allocator, site_root, db);
@@ -307,10 +73,26 @@ fn indexSite(allocator: mem.Allocator, site_root: []const u8, db: *Database) !vo
     try indexComponents(site_root, db);
 }
 
+fn readAbsoluteFileAlloc(allocator: mem.Allocator, fs_io: std.Io, filepath: []const u8) ![]const u8 {
+    var file = try std.Io.Dir.openFileAbsolute(fs_io, filepath, .{});
+    defer file.close(fs_io);
+
+    const stat = try file.stat(fs_io);
+    if (stat.size > std.math.maxInt(usize)) return error.FileTooBig;
+
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = file.reader(fs_io, &reader_buffer);
+    return try reader.interface.readAlloc(allocator, @intCast(stat.size));
+}
+
 fn indexPages(unlimited_allocator: mem.Allocator, site_root: []const u8, db: *Database) !void {
     var page_count: u32 = 0;
+    var threaded_io: std.Io.Threaded = .init(unlimited_allocator, .{});
+    defer threaded_io.deinit();
+    const fs_io = threaded_io.io();
 
     var page_it = filesystem.walker(site_root, "pages");
+    defer page_it.deinit();
     while (page_it.next() catch |err| switch (err) {
         error.CannotOpenDirectory => {
             log.err("Cannot open pages dir at {s}/{s}.", .{ page_it.root, page_it.subpath });
@@ -319,24 +101,30 @@ fn indexPages(unlimited_allocator: mem.Allocator, site_root: []const u8, db: *Da
         },
         else => return err,
     }) |entry| {
-        const file = try entry.openFile();
-        defer file.close();
+        if (entry.kind != .file) continue;
 
-        debug.assert(try file.getPos() == 0);
-        const length = try file.getEndPos();
+        var filepath_buf: [fs.max_path_bytes]u8 = undefined;
+        const filepath = try entry.realpath(&filepath_buf);
+
+        var file = try std.Io.Dir.openFileAbsolute(fs_io, filepath, .{});
+        defer file.close(fs_io);
+
+        const length = (try file.stat(fs_io)).size;
 
         // alice.txt is 148.57kb. I doubt I'll write a single markdown file
         // longer than the entire Alice's Adventures in Wonderland.
         debug.assert(length < size_of_alice_txt);
 
-        var filepath_buf: [fs.MAX_NAME_BYTES]u8 = undefined;
-        const filepath = try entry.realpath(&filepath_buf);
+        const contents = try readAbsoluteFileAlloc(unlimited_allocator, fs_io, filepath);
+        defer unlimited_allocator.free(contents);
 
-        const data = page.Data.fromReader(unlimited_allocator, file.reader(), size_of_alice_txt) catch |err| {
+        const code_fence = page.CodeFence.parse(contents) orelse {
+            log.err("Malformed page in source file: {s}", .{filepath});
+            return error.MissingFrontmatter;
+        };
+
+        const data = page.Data.fromYamlString(unlimited_allocator, code_fence.within, null) catch |err| {
             switch (err) {
-                error.MissingFrontmatter => {
-                    log.err("Malformed page in source file: {s}", .{filepath});
-                },
                 error.MissingSlug => {
                     log.err("Page is missing required, non-empty frontmatter parameter: slug (source file: {s})", .{filepath});
                 },
@@ -373,8 +161,12 @@ fn indexPages(unlimited_allocator: mem.Allocator, site_root: []const u8, db: *Da
 
 fn indexTemplates(site_root: []const u8, db: *Database) !void {
     var template_count: u32 = 0;
+    var threaded_io: std.Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer threaded_io.deinit();
+    const fs_io = threaded_io.io();
 
     var template_it = filesystem.walker(site_root, "templates");
+    defer template_it.deinit();
     while (template_it.next() catch |err| switch (err) {
         error.CannotOpenDirectory => {
             log.err("Cannot open templates dir at {s}/{s}.", .{ template_it.root, template_it.subpath });
@@ -383,20 +175,21 @@ fn indexTemplates(site_root: []const u8, db: *Database) !void {
         },
         else => return err,
     }) |entry| {
-        const file = try entry.openFile();
-        defer file.close();
+        if (entry.kind != .file) continue;
 
-        debug.assert(try file.getPos() == 0);
-        const length = try file.getEndPos();
+        var filepath_buf: [fs.max_path_bytes]u8 = undefined;
+        const filepath = try entry.realpath(&filepath_buf);
+
+        var file = try std.Io.Dir.openFileAbsolute(fs_io, filepath, .{});
+        defer file.close(fs_io);
+
+        const length = (try file.stat(fs_io)).size;
 
         // I don't think it makes sense to have an empty template file, right?
         if (length == 0) {
             log.err("Template file cannot be empty. (template path: {s})", .{entry.subpath});
             return error.EmptyTemplate;
         }
-
-        var filepath_buf: [fs.MAX_NAME_BYTES]u8 = undefined;
-        const filepath = try entry.realpath(&filepath_buf);
 
         try storage.Template.insert(
             db,
@@ -413,6 +206,7 @@ fn indexComponents(site_root: []const u8, db: *Database) !void {
     var component_count: u32 = 0;
 
     var component_it = filesystem.walker(site_root, "components");
+    defer component_it.deinit();
     while (component_it.next() catch |err| switch (err) {
         error.CannotOpenDirectory => {
             log.err("Cannot open components dir at {s}/{s}.", .{ component_it.root, component_it.subpath });
@@ -420,7 +214,9 @@ fn indexComponents(site_root: []const u8, db: *Database) !void {
         },
         else => return err,
     }) |entry| {
-        var filepath_buf: [fs.MAX_NAME_BYTES]u8 = undefined;
+        if (entry.kind != .file) continue;
+
+        var filepath_buf: [fs.max_path_bytes]u8 = undefined;
         const filepath = try entry.realpath(&filepath_buf);
 
         try storage.Component.insert(
@@ -438,16 +234,14 @@ fn indexComponents(site_root: []const u8, db: *Database) !void {
 }
 
 const std = @import("std");
+const process = std.process;
 const mem = std.mem;
 const cli = @import("Cli.zig");
-const httpz = @import("httpz");
-const time = std.time;
 const Database = @import("Database.zig");
 const storage = @import("storage.zig");
 const filesystem = @import("source/filesystem.zig");
 const log = std.log.scoped(.goku);
 const debug = std.debug;
-const fmt = std.fmt;
 const fs = std.fs;
 const page = @import("page.zig");
 const heap = std.heap;

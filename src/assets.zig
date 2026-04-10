@@ -26,48 +26,48 @@ pub const Manifest = struct {
         return self.map.get(path);
     }
 
-    pub fn processSiteAssets(self: *Manifest, site_root: []const u8, out_dir: fs.Dir) !void {
-        var root_dir = try fs.openDirAbsolute(site_root, .{});
-        defer root_dir.close();
-
-        _ = root_dir.access("assets", .{}) catch |err| switch (err) {
-            error.FileNotFound => return,
-            else => return err,
-        };
-
+    pub fn processSiteAssets(self: *Manifest, site_root: []const u8, out_dir: std.Io.Dir, fs_io: std.Io) !void {
         const allocator = self.arena.allocator();
         const assets_root = try fs.path.join(allocator, &.{ site_root, "assets" });
 
         var walker = filesystem.walker(site_root, "assets");
-        while (try walker.next()) |entry| {
-            const source_abs = try entry.realpath(try allocator.alloc(u8, fs.max_path_bytes));
-            const rel = try fs.path.relative(allocator, assets_root, source_abs);
+        defer walker.deinit();
+        while (walker.next() catch |err| switch (err) {
+            error.CannotOpenDirectory => return,
+            else => return err,
+        }) |entry| {
+            var source_path_buf: [fs.max_path_bytes]u8 = undefined;
+            const source_abs = try entry.realpath(&source_path_buf);
+            const rel = try fs.path.relative(allocator, "", null, assets_root, source_abs);
             const contents = blk: {
-                var file = try entry.openFile();
-                defer file.close();
-                break :blk try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+                var file = try std.Io.Dir.openFileAbsolute(fs_io, source_abs, .{});
+                defer file.close(fs_io);
+                var reader_buffer: [4096]u8 = undefined;
+                var reader = file.reader(fs_io, &reader_buffer);
+                break :blk try reader.interface.allocRemaining(allocator, .limited(std.math.maxInt(usize)));
             };
 
             const hashed_rel = try hashedRelativePath(allocator, rel, contents);
-            try writeAsset(out_dir, hashed_rel, contents);
+            try writeAsset(out_dir, fs_io, hashed_rel, contents);
             try self.map.put(allocator, try allocator.dupe(u8, rel), hashed_rel);
         }
     }
 
-    fn writeAsset(out_dir: fs.Dir, relative_path: []const u8, contents: []const u8) !void {
+    fn writeAsset(out_dir: std.Io.Dir, fs_io: std.Io, relative_path: []const u8, contents: []const u8) !void {
         if (fs.path.dirname(relative_path)) |parent| {
-            var dir = try out_dir.makeOpenPath(parent, .{});
-            defer dir.close();
-
-            var file = try dir.createFile(fs.path.basename(relative_path), .{});
-            defer file.close();
-            try file.writeAll(contents);
+            var dir = try out_dir.createDirPathOpen(fs_io, parent, .{});
+            defer dir.close(fs_io);
+            try dir.writeFile(fs_io, .{
+                .sub_path = fs.path.basename(relative_path),
+                .data = contents,
+            });
             return;
         }
 
-        var file = try out_dir.createFile(relative_path, .{});
-        defer file.close();
-        try file.writeAll(contents);
+        try out_dir.writeFile(fs_io, .{
+            .sub_path = relative_path,
+            .data = contents,
+        });
     }
 };
 
@@ -75,14 +75,13 @@ pub fn hashedRelativePath(allocator: mem.Allocator, rel: []const u8, contents: [
     var digest: [std.crypto.hash.Md5.digest_length]u8 = undefined;
     std.crypto.hash.Md5.hash(contents, &digest, .{});
 
-    var hash_buf: [12]u8 = undefined;
-    _ = std.fmt.bufPrint(&hash_buf, "{s}", .{std.fmt.fmtSliceHexLower(digest[0..6])}) catch unreachable;
+    const hash_buf = std.fmt.bytesToHex(digest[0..6], .lower);
 
     const dirname = fs.path.dirname(rel);
     const basename = fs.path.basename(rel);
     const ext = fs.path.extension(basename);
     const stem = basename[0 .. basename.len - ext.len];
-    const hashed_basename = try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ stem, hash_buf[0 .. digest[0..6].len * 2], ext });
+    const hashed_basename = try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ stem, hash_buf[0..], ext });
     defer allocator.free(hashed_basename);
 
     return if (dirname) |parent|

@@ -1,7 +1,7 @@
 const c = @import("c");
 const debug = std.debug;
 const fmt = std.fmt;
-const io = std.io;
+const io = std.Io;
 const log = std.log.scoped(.@"page.Data");
 const math = std.math;
 const mem = std.mem;
@@ -36,7 +36,7 @@ pub fn fromReader(allocator: mem.Allocator, reader: anytype, max_len: usize) err
     MissingFrontmatter,
     MissingTemplate,
 }!Data {
-    const bytes: []const u8 = reader.readAllAlloc(allocator, max_len) catch return error.ReadError;
+    const bytes: []const u8 = readAllAllocCompat(reader, allocator, max_len) catch return error.ReadError;
     defer allocator.free(bytes);
 
     const code_fence_result = CodeFence.parse(bytes) orelse return error.MissingFrontmatter;
@@ -52,6 +52,19 @@ pub fn fromReader(allocator: mem.Allocator, reader: anytype, max_len: usize) err
         => |e| e,
         else => error.ParseError,
     };
+}
+
+fn readAllAllocCompat(source_reader: anytype, allocator: mem.Allocator, max_len: usize) ![]const u8 {
+    const ReaderType = switch (@typeInfo(@TypeOf(source_reader))) {
+        .pointer => |pointer| pointer.child,
+        else => @TypeOf(source_reader),
+    };
+
+    var reader = source_reader;
+    if (@hasDecl(ReaderType, "readAllAlloc")) {
+        return reader.readAllAlloc(allocator, max_len);
+    }
+    return reader.allocRemaining(allocator, .limited(max_len));
 }
 
 pub const Diagnostics = struct {
@@ -386,12 +399,11 @@ test fromReader {
         \\---
     ;
 
-    var fbs = std.io.fixedBufferStream(input);
-    const reader = fbs.reader();
+    var reader = io.Reader.fixed(input);
 
     const yaml = try fromReader(
         testing.allocator,
-        reader,
+        &reader,
         std.math.maxInt(usize),
     );
 
@@ -402,16 +414,15 @@ test fromReader {
 }
 
 test "fromReader - fail(empty frontmatter)" {
-    var fbs = io.fixedBufferStream(
+    var reader = io.Reader.fixed(
         \\---
         \\---
         ,
     );
-    const reader = fbs.reader();
 
     const result = fromReader(
         testing.allocator,
-        reader,
+        &reader,
         math.maxInt(usize),
     );
 
@@ -422,17 +433,16 @@ test "fromReader - fail(empty frontmatter)" {
 }
 
 test "fromReader - fail(invalid yaml)" {
-    var fbs = io.fixedBufferStream(
+    var reader = io.Reader.fixed(
         \\---
         \\:
         \\---
         ,
     );
-    const reader = fbs.reader();
 
     const result = fromReader(
         testing.allocator,
-        reader,
+        &reader,
         math.maxInt(usize),
     );
 

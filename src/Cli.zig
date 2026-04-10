@@ -6,12 +6,7 @@
 //! - preview
 
 pub fn printHelp() void {
-    const stderr = io.getStdErr().writer();
-
-    stderr.print(
-        "{s}",
-        .{standard_help},
-    ) catch {};
+    std.debug.print("{s}", .{standard_help});
 }
 
 pub const Command = union(enum) {
@@ -46,7 +41,7 @@ pub const Command = union(enum) {
     };
 
     /// Assumes the exe name has already been consumed in the iterator
-    pub fn parse(args: *process.ArgIterator) !?Command {
+    pub fn parse(args: *process.Args.Iterator) !?Command {
         const command = args.next() orelse return null;
 
         if (mem.eql(u8, command, "build")) {
@@ -62,7 +57,7 @@ pub const Command = union(enum) {
         return null;
     }
 
-    pub fn parseBuildArgs(args: *process.ArgIterator) !Command {
+    pub fn parseBuildArgs(args: *process.Args.Iterator) !Command {
         var site_root: ?[]const u8 = null;
         var out_dir: ?[]const u8 = null;
         var url_prefix: ?[]const u8 = null;
@@ -97,7 +92,7 @@ pub const Command = union(enum) {
         return .{ .build = build };
     }
 
-    pub fn parsePreviewArgs(args: *process.ArgIterator) !Command {
+    pub fn parsePreviewArgs(args: *process.Args.Iterator) !Command {
         var site_root: ?[]const u8 = null;
         var out_dir: ?[]const u8 = null;
         var url_prefix: ?[]const u8 = null;
@@ -131,7 +126,7 @@ pub const Command = union(enum) {
         return .{ .preview = preview };
     }
 
-    pub fn parseInitArgs(args: *process.ArgIterator) !Command {
+    pub fn parseInitArgs(args: *process.Args.Iterator) !Command {
         var site_root: ?[]const u8 = null;
 
         while (args.next()) |arg| {
@@ -175,7 +170,6 @@ const debug = std.debug;
 const fmt = std.fmt;
 const fs = std.fs;
 const heap = std.heap;
-const io = std.io;
 const log = std.log.scoped(.goku);
 const mem = std.mem;
 const httpz = @import("httpz");

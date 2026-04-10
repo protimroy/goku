@@ -11,12 +11,12 @@ pub const std_options: std.Options = .{
     },
 };
 
-pub fn main() !void {
-    var gpa: heap.GeneralPurposeAllocator(.{}) = .{};
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa: heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const unlimited_allocator = gpa.allocator();
 
-    var iter = try process.ArgIterator.initWithAllocator(unlimited_allocator);
+    var iter = try process.Args.Iterator.initAllocator(init.args, unlimited_allocator);
     defer iter.deinit();
 
     // skip exe name
