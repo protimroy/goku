@@ -24,11 +24,13 @@ pub fn build(b: *std.Build) !void {
     if (embedded_icons) |icons| {
         for (icons) |i| {
             const path = lucide_src.path(b.fmt("icons/{s}.svg", .{i}));
+            const resolved = path.getPath3(b, null);
 
-            const file = fs.openFileAbsolute(path.getPath(b), .{}) catch |err| {
+            const file = resolved.root_dir.handle.openFile(resolved.sub_path, .{}) catch |err| {
                 log.err("Could not load icon ({s})\n", .{i});
                 return err;
             };
+            defer file.close();
 
             const svg = try file.readToEndAlloc(b.allocator, math.maxInt(u32));
             options.addOption([]const u8, i, svg);
