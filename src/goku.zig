@@ -35,10 +35,7 @@ pub fn build(unlimited_allocator: mem.Allocator, args: cli.Command.Build) !void 
     var site: Site = try .init(unlimited_allocator, &db, site_root, args.url_prefix, args.theme);
     defer site.deinit();
 
-    var out_dir = if (fs.path.isAbsolute(args.out_dir))
-        try fs.openDirAbsolute(args.out_dir, .{})
-    else
-        try fs.cwd().makeOpenPath(args.out_dir, .{});
+    var out_dir = try openOutputDir(args.out_dir);
     defer out_dir.close();
 
     try site.write(.sitemap, out_dir);
@@ -72,7 +69,7 @@ pub fn preview(unlimited_allocator: mem.Allocator, args: cli.Command.Preview) !v
     var site: Site = try .init(unlimited_allocator, &db, site_root, args.url_prefix, args.theme);
     defer site.deinit();
 
-    var out_dir = try fs.openDirAbsolute(args.out_dir, .{});
+    var out_dir = try openOutputDir(args.out_dir);
     defer out_dir.close();
 
     try site.write(.sitemap, out_dir);
@@ -98,6 +95,10 @@ pub fn preview(unlimited_allocator: mem.Allocator, args: cli.Command.Preview) !v
 
     log.info("Listening on http://localhost:8552", .{});
     try server.listen();
+}
+
+fn openOutputDir(path: []const u8) !fs.Dir {
+    return fs.cwd().makeOpenPath(path, .{});
 }
 
 const PreviewServer = struct {
