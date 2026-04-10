@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>{{title}}</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="keywords" content="zig,static site generator,markdown,mustache">
+    {{& seo.head}}
+    {{& theme.head}}
+    {{& page_assets.head}}
+    {{& component.head}}
+    <style>a[href^="https://"]::after {
+      content: " [*]";
+      }
+      .navbar-menu {
+        box-shadow: none;
+      }
+      strong code {
+        font-weight: 700;
+        letter-spacing: 0;
+        animation: widen 2s infinite alternate ease-in-out;
+      }
+      @keyframes widen {
+        from {
+          letter-spacing: 0;
+        }
+        to {
+          letter-spacing: 0.3em;
+        }
+      }
+      p > code { text-wrap: nowrap; }
+      .admonition {
+        margin: 1.5rem 0;
+        padding: 1rem 1.1rem;
+        border-left: 0.35rem solid #4a4a4a;
+        background: #f7f7f4;
+      }
+      .admonition-title {
+        margin-bottom: 0.5rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.8rem;
+      }
+      .admonition-note { border-left-color: #3e8ed0; }
+      .admonition-tip { border-left-color: #48c78e; }
+      .admonition-info { border-left-color: #3850b7; }
+      .admonition-warning { border-left-color: #f5c542; }
+      .admonition-important { border-left-color: #7a4ff1; }
+      .admonition-caution { border-left-color: #f14668; }
+      .details-block {
+        margin: 1.5rem 0;
+        padding: 0;
+        border: 1px solid #dbdbdb;
+        border-radius: 0;
+        background: #fafaf8;
+        overflow: hidden;
+      }
+      .details-block > summary {
+        display: block;
+        list-style: none;
+        position: relative;
+        margin: 0;
+        padding: 0.85rem 2.75rem 0.85rem 1rem;
+        cursor: pointer;
+        font-weight: 700;
+        background: #fafaf8;
+        user-select: none;
+      }
+      .details-block > summary::-webkit-details-marker {
+        display: none;
+      }
+      .details-block > summary::after {
+        content: "+";
+        position: absolute;
+        top: 50%;
+        right: 1rem;
+        transform: translateY(-50%);
+        font-size: 1rem;
+        font-weight: 400;
+      }
+      .details-block[open] > summary {
+        border-bottom: 1px solid #dbdbdb;
+      }
+      .details-block[open] > summary::after {
+        content: "-";
+      }
+      .details-block > :not(summary) {
+        margin: 0;
+        padding: 0.85rem 1rem 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="section">
+      <div class="container">
+        <nav class="navbar mb-4" role="navigation">
+          <div class="navbar-menu is-active">
+            <div class="navbar-start">
+              <a href="{{site_root}}/" class="navbar-item">Home</a>
+            </div>
+            <div class="navbar-end">
+              <a href="{{site_root}}/docs" class="navbar-item">Docs</a>
+              <a href="{{site_root}}/changelog" class="navbar-item">Changelog</a>
+              <a href="https://github.com/sea-grass/goku" class="navbar-item">Source code</a>
+            </div>
+          </div>
+        </nav>
+      </div>
+      <div class="container" id="content">
+        <h1 class="title">
+          <span class="icon-text">{{& lucide.apple}}
+            <span>{{title}}</span></span>
+        </h1>
+        {{& meta }}
+        <p class="subtitle">{{ description }}</p>
+        <section class="content">
+          {{& content}}
+        </section>
+        {{& page.nav}}
+      </div>
+    </section>
+    {{& theme.body}}
+    {{& page_assets.body}}
+    {{& component.body}}
+  </body>
+</html>
