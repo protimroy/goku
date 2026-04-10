@@ -15,6 +15,12 @@ title: ?[]const u8 = null,
 date: ?[]const u8 = null,
 template: ?[]const u8 = null,
 description: ?[]const u8 = null,
+author: ?[]const u8 = null,
+updated: ?[]const u8 = null,
+image: ?[]const u8 = null,
+canonical_url: ?[]const u8 = null,
+doi: ?[]const u8 = null,
+bibliography: ?[]const u8 = null,
 theme: ?[]const u8 = null,
 paginate: ?u32 = null,
 allow_html: bool = false,
@@ -87,8 +93,15 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
         date,
         collection,
         description,
+        author,
+        updated,
+        image,
+        canonical_url,
+        doi,
+        bibliography,
         template,
         allow_html,
+        options_toc,
         theme,
         paginate,
         tags,
@@ -108,6 +121,24 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
     var description: ?[]const u8 = null;
     errdefer if (description) |f| allocator.free(f);
 
+    var author: ?[]const u8 = null;
+    errdefer if (author) |f| allocator.free(f);
+
+    var updated: ?[]const u8 = null;
+    errdefer if (updated) |f| allocator.free(f);
+
+    var image: ?[]const u8 = null;
+    errdefer if (image) |f| allocator.free(f);
+
+    var canonical_url: ?[]const u8 = null;
+    errdefer if (canonical_url) |f| allocator.free(f);
+
+    var doi: ?[]const u8 = null;
+    errdefer if (doi) |f| allocator.free(f);
+
+    var bibliography: ?[]const u8 = null;
+    errdefer if (bibliography) |f| allocator.free(f);
+
     var date: ?[]const u8 = null;
     errdefer if (date) |f| allocator.free(f);
 
@@ -117,6 +148,7 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
     var paginate: ?u32 = null;
 
     var allow_html: bool = false;
+    var options_toc: bool = false;
 
     while (!done) {
         if (c.yaml_parser_parse(ptr, ev_ptr) == 0) {
@@ -154,10 +186,24 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
                             next_scalar_expected = .tags;
                         } else if (mem.eql(u8, value, "description")) {
                             next_scalar_expected = .description;
+                        } else if (mem.eql(u8, value, "author")) {
+                            next_scalar_expected = .author;
+                        } else if (mem.eql(u8, value, "updated")) {
+                            next_scalar_expected = .updated;
+                        } else if (mem.eql(u8, value, "image")) {
+                            next_scalar_expected = .image;
+                        } else if (mem.eql(u8, value, "canonical_url")) {
+                            next_scalar_expected = .canonical_url;
+                        } else if (mem.eql(u8, value, "doi")) {
+                            next_scalar_expected = .doi;
+                        } else if (mem.eql(u8, value, "bibliography")) {
+                            next_scalar_expected = .bibliography;
                         } else if (mem.eql(u8, value, "template")) {
                             next_scalar_expected = .template;
                         } else if (mem.eql(u8, value, "allow_html")) {
                             next_scalar_expected = .allow_html;
+                        } else if (mem.eql(u8, value, "options_toc")) {
+                            next_scalar_expected = .options_toc;
                         } else if (mem.eql(u8, value, "theme")) {
                             next_scalar_expected = .theme;
                         } else if (mem.eql(u8, value, "paginate")) {
@@ -188,6 +234,16 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
                         }
                         next_scalar_expected = .key;
                     },
+                    .options_toc => {
+                        if (mem.eql(u8, value, "true")) {
+                            options_toc = true;
+                        } else if (mem.eql(u8, value, "false")) {
+                            options_toc = false;
+                        } else {
+                            return error.UnexpectedValue;
+                        }
+                        next_scalar_expected = .key;
+                    },
                     .collection => {
                         collection = try allocator.dupe(u8, value);
                         next_scalar_expected = .key;
@@ -201,6 +257,30 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
                     },
                     .description => {
                         description = try allocator.dupe(u8, value);
+                        next_scalar_expected = .key;
+                    },
+                    .author => {
+                        author = try allocator.dupe(u8, value);
+                        next_scalar_expected = .key;
+                    },
+                    .updated => {
+                        updated = try allocator.dupe(u8, value);
+                        next_scalar_expected = .key;
+                    },
+                    .image => {
+                        image = try allocator.dupe(u8, value);
+                        next_scalar_expected = .key;
+                    },
+                    .canonical_url => {
+                        canonical_url = try allocator.dupe(u8, value);
+                        next_scalar_expected = .key;
+                    },
+                    .doi => {
+                        doi = try allocator.dupe(u8, value);
+                        next_scalar_expected = .key;
+                    },
+                    .bibliography => {
+                        bibliography = try allocator.dupe(u8, value);
                         next_scalar_expected = .key;
                     },
                     .theme => {
@@ -240,8 +320,15 @@ pub fn fromYamlString(allocator: mem.Allocator, data: []const u8, diag: ?*Diagno
         .template = template,
         .collection = collection,
         .allow_html = allow_html,
+        .options_toc = options_toc,
         .date = date,
         .description = description,
+        .author = author,
+        .updated = updated,
+        .image = image,
+        .canonical_url = canonical_url,
+        .doi = doi,
+        .bibliography = bibliography,
         .theme = theme,
         .paginate = paginate,
     };
@@ -266,6 +353,24 @@ pub fn deinit(self: Data, allocator: mem.Allocator) void {
 
     if (self.description) |description| {
         allocator.free(description);
+    }
+    if (self.author) |author| {
+        allocator.free(author);
+    }
+    if (self.updated) |updated| {
+        allocator.free(updated);
+    }
+    if (self.image) |image| {
+        allocator.free(image);
+    }
+    if (self.canonical_url) |canonical_url| {
+        allocator.free(canonical_url);
+    }
+    if (self.doi) |doi| {
+        allocator.free(doi);
+    }
+    if (self.bibliography) |bibliography| {
+        allocator.free(bibliography);
     }
     if (self.theme) |theme| {
         allocator.free(theme);
@@ -354,6 +459,48 @@ test fromYamlString {
 
     try testing.expectEqualStrings("/", yaml.slug);
     try testing.expectEqualStrings("Home page", yaml.title.?);
+}
+
+test "fromYamlString parses options_toc" {
+    const input =
+        \\slug: /
+        \\title: Home page
+        \\template: foo.html
+        \\options_toc: true
+    ;
+
+    const yaml = try fromYamlString(
+        testing.allocator,
+        input,
+        null,
+    );
+    defer yaml.deinit(testing.allocator);
+
+    try testing.expectEqual(true, yaml.options_toc);
+}
+
+test "fromYamlString parses seo metadata fields" {
+    const input =
+        \\slug: /paper
+        \\title: Paper
+        \\template: page.html
+        \\author: Researcher
+        \\updated: 2026-04-01
+        \\image: /images/cover.png
+        \\canonical_url: https://example.com/paper
+        \\doi: 10.1000/example
+        \\bibliography: bibliography/references.bib
+    ;
+
+    const yaml = try fromYamlString(testing.allocator, input, null);
+    defer yaml.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("Researcher", yaml.author.?);
+    try testing.expectEqualStrings("2026-04-01", yaml.updated.?);
+    try testing.expectEqualStrings("/images/cover.png", yaml.image.?);
+    try testing.expectEqualStrings("https://example.com/paper", yaml.canonical_url.?);
+    try testing.expectEqualStrings("10.1000/example", yaml.doi.?);
+    try testing.expectEqualStrings("bibliography/references.bib", yaml.bibliography.?);
 }
 
 test "fromYamlString - Error" {

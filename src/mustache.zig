@@ -10,6 +10,7 @@ const log = std.log.scoped(.mustache);
 const htm = @import("htm");
 const vhtml = @import("vhtml");
 const lucide = @import("lucide");
+const markdown = @import("markdown.zig");
 const math = std.math;
 const mem = std.mem;
 const std = @import("std");
@@ -36,12 +37,6 @@ test renderStream {
     var buf = std.ArrayList(u8).init(testing.allocator);
     defer buf.deinit();
 
-    var styles_buf = std.ArrayList(u8).init(testing.allocator);
-    defer styles_buf.deinit();
-
-    var scripts_buf = std.ArrayList(u8).init(testing.allocator);
-    defer scripts_buf.deinit();
-
     const template = "{{title}}";
 
     var db = try @import("Database.zig").init(testing.allocator);
@@ -49,20 +44,22 @@ test renderStream {
     try storage.Template.init(&db);
     defer db.deinit();
 
+    var component_assets = try ComponentAssets.init(testing.allocator, &db);
+    defer component_assets.deinit();
+
     try renderStream(
         testing.allocator,
         template,
         .{
             .db = db,
             .site_root = "/",
+            .component_assets = &component_assets,
             .data = .{
                 .title = "foo",
                 .slug = "/foo",
             },
         },
         buf.writer(),
-        styles_buf.writer(),
-        scripts_buf.writer(),
     );
 
     try testing.expectEqualStrings("foo", buf.items);
@@ -213,6 +210,20 @@ fn GetHandleType(comptime UserContext: type) type {
             return null;
         }
 
+        fn pageUrl(get_handle: *GetHandle, arena: mem.Allocator) ![]const u8 {
+            if (@hasField(@TypeOf(get_handle.user_context.data), "canonical_url")) {
+                if (@field(get_handle.user_context.data, "canonical_url")) |canonical_url| {
+                    return try arena.dupe(u8, canonical_url);
+                }
+            }
+
+            return try fmt.allocPrint(
+                arena,
+                "{s}{s}",
+                .{ get_handle.user_context.site_root, get_handle.user_context.data.slug },
+            );
+        }
+
         fn getCollectionsLatest(get_handle: *GetHandle, arena: mem.Allocator, collection: []const u8) ![]const u8 {
             const get_page = .{
                 .stmt =
@@ -291,6 +302,44 @@ fn GetHandleType(comptime UserContext: type) type {
             , .{});
 
             return try buf.toOwnedSlice();
+        }
+
+        fn renderedPage(get_handle: *GetHandle) ?markdown.Rendered {
+            if (!@hasField(UserContext, "rendered")) return null;
+            return @field(get_handle.user_context, "rendered");
+        }
+
+        const NeighborDirection = enum { prev, next };
+        const NeighborPage = struct {
+            slug: []const u8,
+            title: []const u8,
+        };
+
+        fn getCollectionNeighbor(get_handle: *GetHandle, arena: mem.Allocator, direction: NeighborDirection) !?NeighborPage {
+            if (!@hasField(@TypeOf(get_handle.user_context.data), "collection")) return null;
+            const collection = @field(get_handle.user_context.data, "collection") orelse return null;
+
+            var stmt = try get_handle.user_context.db.db.prepare(
+                \\SELECT slug, title
+                \\FROM pages
+                \\WHERE collection = ?
+                \\ORDER BY date DESC, title ASC
+            );
+            defer stmt.deinit();
+
+            var it = try stmt.iterator(NeighborPage, .{ .collection = collection });
+            var prev: ?NeighborPage = null;
+            while (try it.nextAlloc(arena, .{})) |entry| {
+                if (mem.eql(u8, entry.slug, get_handle.user_context.data.slug)) {
+                    return switch (direction) {
+                        .prev => prev,
+                        .next => try it.nextAlloc(arena, .{}),
+                    };
+                }
+                prev = entry;
+            }
+
+            return null;
         }
     };
 }
@@ -478,6 +527,192 @@ fn MustacheWriterType(comptime UserContext: type) type {
                         try mw.context.getMeta(mw.arena)
                     else
                         null;
+                }
+
+                pub fn getToc(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "toc")) return null;
+                    const rendered = mw.context.renderedPage() orelse return "";
+                    if (!@hasField(@TypeOf(mw.context.user_context.data), "options_toc")) return "";
+                    return if (@field(mw.context.user_context.data, "options_toc")) rendered.toc_html else "";
+                }
+
+                pub fn getReadingTime(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "reading_time")) return null;
+                    const rendered = mw.context.renderedPage() orelse return "";
+                    return try fmt.allocPrint(mw.arena, "{d} min read", .{rendered.readingTimeMinutes()});
+                }
+            };
+
+            const PageGetter = struct {
+                fn fieldOrEmpty(data: anytype, comptime name: []const u8) []const u8 {
+                    if (!@hasField(@TypeOf(data), name)) return "";
+
+                    const value = @field(data, name);
+                    return switch (@typeInfo(@TypeOf(value))) {
+                        .optional => value orelse "",
+                        .pointer => value,
+                        else => "",
+                    };
+                }
+
+                fn escapeHtmlAttr(arena: mem.Allocator, value: []const u8) ![]const u8 {
+                    var buf = std.ArrayList(u8).init(arena);
+                    for (value) |char| {
+                        switch (char) {
+                            '&' => try buf.appendSlice("&amp;"),
+                            '"' => try buf.appendSlice("&quot;"),
+                            '<' => try buf.appendSlice("&lt;"),
+                            '>' => try buf.appendSlice("&gt;"),
+                            else => try buf.append(char),
+                        }
+                    }
+                    return try buf.toOwnedSlice();
+                }
+
+                fn normalizeUrl(mw: *MustacheWriter, value: []const u8) ![]const u8 {
+                    if (mem.startsWith(u8, value, "http://") or mem.startsWith(u8, value, "https://")) {
+                        return try mw.arena.dupe(u8, value);
+                    }
+
+                    if (mem.startsWith(u8, value, "/assets/") and @hasField(UserContext, "asset_manifest")) {
+                        const manifest: *const assets.Manifest = @field(mw.context.user_context, "asset_manifest");
+                        if (manifest.get(value["/assets/".len..])) |resolved| {
+                            return try fmt.allocPrint(mw.arena, "{s}/{s}", .{ mw.context.user_context.site_root, resolved });
+                        }
+                    }
+
+                    if (mem.startsWith(u8, value, "/")) {
+                        return try fmt.allocPrint(mw.arena, "{s}{s}", .{ mw.context.user_context.site_root, value });
+                    }
+                    return try mw.arena.dupe(u8, value);
+                }
+
+                pub fn getAssetsHead(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "page_assets.head")) return null;
+                    const rendered = mw.context.renderedPage() orelse return "";
+
+                    var buf = std.ArrayList(u8).init(mw.arena);
+                    if (rendered.has_math) {
+                        try buf.appendSlice("<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css\" integrity=\"sha384-hIoBPJpTUs74eN9mteA94ppIqhzyapMI2vlA38nSxrdbidK4USsfx8bVsgcuyo6S\" crossorigin=\"anonymous\">");
+                    }
+                    if (rendered.has_code) {
+                        try buf.appendSlice("<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/styles/github.min.css\">");
+                    }
+                    return if (buf.items.len == 0) "" else try buf.toOwnedSlice();
+                }
+
+                pub fn getAssetsBody(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "page_assets.body")) return null;
+                    const rendered = mw.context.renderedPage() orelse return "";
+
+                    var buf = std.ArrayList(u8).init(mw.arena);
+                    if (rendered.has_math) {
+                        try buf.appendSlice("<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js\" crossorigin=\"anonymous\"></script><script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js\" crossorigin=\"anonymous\"></script><script>document.addEventListener('DOMContentLoaded', function () { if (window.renderMathInElement) { window.renderMathInElement(document.getElementById('content'), { delimiters: [{left: '\\\\(', right: '\\\\)', display: false}, {left: '\\\\[', right: '\\\\]', display: true}] }); } });</script>");
+                    }
+                    if (rendered.has_code) {
+                        try buf.appendSlice("<script src=\"https://cdn.jsdelivr.net/npm/highlight.js@11.10.0/lib/highlight.min.js\"></script><script>document.addEventListener('DOMContentLoaded', function () { if (window.hljs) { window.hljs.highlightAll(); } });</script>");
+                    }
+                    return if (buf.items.len == 0) "" else try buf.toOwnedSlice();
+                }
+
+                pub fn getSeoHead(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "seo.head")) return null;
+
+                    const page_url = try mw.context.pageUrl(mw.arena);
+                    const escaped_title = try escapeHtmlAttr(mw.arena, fieldOrEmpty(mw.context.user_context.data, "title"));
+                    const escaped_description = try escapeHtmlAttr(mw.arena, fieldOrEmpty(mw.context.user_context.data, "description"));
+                    const escaped_page_url = try escapeHtmlAttr(mw.arena, page_url);
+
+                    var buf = std.ArrayList(u8).init(mw.arena);
+                    try buf.writer().print("<link rel=\"canonical\" href=\"{s}\">", .{escaped_page_url});
+                    if (escaped_description.len > 0) {
+                        try buf.writer().print("<meta name=\"description\" content=\"{s}\">", .{escaped_description});
+                    }
+                    try buf.writer().print("<meta property=\"og:title\" content=\"{s}\"><meta property=\"og:type\" content=\"article\"><meta property=\"og:url\" content=\"{s}\">", .{ escaped_title, escaped_page_url });
+                    if (escaped_description.len > 0) {
+                        try buf.writer().print("<meta property=\"og:description\" content=\"{s}\">", .{escaped_description});
+                        try buf.writer().print("<meta name=\"twitter:description\" content=\"{s}\">", .{escaped_description});
+                    }
+                    try buf.writer().print("<meta name=\"twitter:card\" content=\"summary_large_image\"><meta name=\"twitter:title\" content=\"{s}\">", .{escaped_title});
+                    if (@hasField(@TypeOf(mw.context.user_context.data), "image")) {
+                        if (@field(mw.context.user_context.data, "image")) |image| {
+                            const image_url = try normalizeUrl(mw, image);
+                            const escaped_image_url = try escapeHtmlAttr(mw.arena, image_url);
+                            try buf.writer().print("<meta property=\"og:image\" content=\"{s}\"><meta name=\"twitter:image\" content=\"{s}\">", .{ escaped_image_url, escaped_image_url });
+                        }
+                    }
+                    if (@hasField(@TypeOf(mw.context.user_context.data), "author")) {
+                        if (@field(mw.context.user_context.data, "author")) |author| {
+                            const escaped_author = try escapeHtmlAttr(mw.arena, author);
+                            try buf.writer().print("<meta name=\"author\" content=\"{s}\">", .{escaped_author});
+                        }
+                    }
+                    if (@hasField(@TypeOf(mw.context.user_context.data), "date")) {
+                        if (@field(mw.context.user_context.data, "date")) |date| {
+                            const escaped_date = try escapeHtmlAttr(mw.arena, date);
+                            try buf.writer().print("<meta property=\"article:published_time\" content=\"{s}\">", .{escaped_date});
+                        }
+                    }
+                    if (@hasField(@TypeOf(mw.context.user_context.data), "updated")) {
+                        if (@field(mw.context.user_context.data, "updated")) |updated| {
+                            const escaped_updated = try escapeHtmlAttr(mw.arena, updated);
+                            try buf.writer().print("<meta property=\"article:modified_time\" content=\"{s}\">", .{escaped_updated});
+                        }
+                    }
+                    if (@hasField(@TypeOf(mw.context.user_context.data), "doi")) {
+                        if (@field(mw.context.user_context.data, "doi")) |doi| {
+                            const escaped_doi = try escapeHtmlAttr(mw.arena, doi);
+                            try buf.writer().print("<meta name=\"citation_doi\" content=\"{s}\">", .{escaped_doi});
+                        }
+                    }
+                    return try buf.toOwnedSlice();
+                }
+
+                pub fn getPrevUrl(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "page.prev_url")) return null;
+                    const prev = try mw.context.getCollectionNeighbor(mw.arena, .prev) orelse return "";
+                    return try fmt.allocPrint(mw.arena, "{s}{s}", .{ mw.context.user_context.site_root, prev.slug });
+                }
+
+                pub fn getPrevTitle(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "page.prev_title")) return null;
+                    const prev = try mw.context.getCollectionNeighbor(mw.arena, .prev) orelse return "";
+                    return prev.title;
+                }
+
+                pub fn getNextUrl(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "page.next_url")) return null;
+                    const next_page = try mw.context.getCollectionNeighbor(mw.arena, .next) orelse return "";
+                    return try fmt.allocPrint(mw.arena, "{s}{s}", .{ mw.context.user_context.site_root, next_page.slug });
+                }
+
+                pub fn getNextTitle(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "page.next_title")) return null;
+                    const next_page = try mw.context.getCollectionNeighbor(mw.arena, .next) orelse return "";
+                    return next_page.title;
+                }
+
+                pub fn getNav(mw: *MustacheWriter, k: []const u8) !?[]const u8 {
+                    if (!mem.eql(u8, k, "page.nav")) return null;
+
+                    const prev = try mw.context.getCollectionNeighbor(mw.arena, .prev);
+                    const next_page = try mw.context.getCollectionNeighbor(mw.arena, .next);
+                    if (prev == null and next_page == null) return "";
+
+                    var buf = std.ArrayList(u8).init(mw.arena);
+                    try buf.appendSlice("<nav class=\"level page-nav\">");
+                    if (prev) |entry| {
+                        try buf.writer().print("<a class=\"level-left\" href=\"{s}{s}\">&larr; {s}</a>", .{ mw.context.user_context.site_root, entry.slug, entry.title });
+                    } else {
+                        try buf.appendSlice("<span class=\"level-left\"></span>");
+                    }
+                    if (next_page) |entry| {
+                        try buf.writer().print("<a class=\"level-right\" href=\"{s}{s}\">{s} &rarr;</a>", .{ mw.context.user_context.site_root, entry.slug, entry.title });
+                    } else {
+                        try buf.appendSlice("<span class=\"level-right\"></span>");
+                    }
+                    try buf.appendSlice("</nav>");
+                    return try buf.toOwnedSlice();
                 }
             };
 
@@ -743,6 +978,8 @@ fn MustacheWriterType(comptime UserContext: type) type {
                     .{ .ctx = ContextGetter.getKnown },
                     .{ .ctx = ContextGetter.getData },
                     .{ .ctx = ContextGetter.getMeta },
+                    .{ .ctx = ContextGetter.getToc },
+                    .{ .ctx = ContextGetter.getReadingTime },
                     .{ .simple = LucideGetter.getIcon },
                     .{ .ctx = CollectionGetter.getList },
                     .{ .ctx = CollectionGetter.getLatest },
@@ -754,6 +991,14 @@ fn MustacheWriterType(comptime UserContext: type) type {
                     .{ .ctx = ComponentGetter.getStyleRef },
                     .{ .ctx = ComponentGetter.getScriptRef },
                     .{ .ctx = ComponentGetter.getComponent },
+                    .{ .ctx = PageGetter.getAssetsHead },
+                    .{ .ctx = PageGetter.getAssetsBody },
+                    .{ .ctx = PageGetter.getSeoHead },
+                    .{ .ctx = PageGetter.getPrevUrl },
+                    .{ .ctx = PageGetter.getPrevTitle },
+                    .{ .ctx = PageGetter.getNextUrl },
+                    .{ .ctx = PageGetter.getNextTitle },
+                    .{ .ctx = PageGetter.getNav },
                     .{ .ctx = AssetGetter.getAssetPath },
                     .{ .ctx = ThemeGetter.getThemeHead },
                     .{ .ctx = ThemeGetter.getThemeBody },

@@ -82,11 +82,13 @@ pub fn hashedRelativePath(allocator: mem.Allocator, rel: []const u8, contents: [
     const basename = fs.path.basename(rel);
     const ext = fs.path.extension(basename);
     const stem = basename[0 .. basename.len - ext.len];
+    const hashed_basename = try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ stem, hash_buf[0 .. digest[0..6].len * 2], ext });
+    defer allocator.free(hashed_basename);
 
     return if (dirname) |parent|
-        try fs.path.join(allocator, &.{ "assets", parent, try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ stem, hash_buf[0 .. digest[0..6].len * 2], ext }) })
+        try fs.path.join(allocator, &.{ "assets", parent, hashed_basename })
     else
-        try fs.path.join(allocator, &.{ "assets", try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ stem, hash_buf[0 .. digest[0..6].len * 2], ext }) });
+        try fs.path.join(allocator, &.{ "assets", hashed_basename });
 }
 
 test hashedRelativePath {
