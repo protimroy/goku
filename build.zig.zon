@@ -4,8 +4,8 @@
     .fingerprint = 0x6258ab6458a3c4a3,
     .dependencies = .{
         .httpz = .{
-            .url = "git+https://github.com/karlseguin/http.zig?ref=zig-0.14#ef50c6878c3c512786e3311df657eb425b87ba91",
-            .hash = "httpz-0.0.0-PNVzrAvCBgDPm4lE3vCQekPyCKAE2TIsbxly-GeS1_gl",
+            .url = "git+https://github.com/karlseguin/http.zig?ref=dev#b1896f4b0bd30deb0351039b1ba470c9041f4117",
+            .hash = "httpz-0.0.0-PNVzrE-8BgCUEVpFtYaUOFrWMqXHBu95eyIYRkXbyriy",
         },
         .custom_test_runner = .{ .path = "./modules/custom-test-runner" },
         .bulma = .{ .path = "./modules/bulma" },

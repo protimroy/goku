@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("httpz", httpz.module("httpz"));
     exe.root_module.addImport("htm", htm.module("htm"));
     exe.root_module.addImport("vhtml", vhtml.module("vhtml"));
+    exe.bundle_ubsan_rt = true;
     exe.linkLibrary(sqlite.artifact("sqlite"));
     b.installArtifact(exe);
 
@@ -81,6 +82,7 @@ pub fn build(b: *std.Build) void {
     exe_unit_tests.root_module.addImport("vhtml", vhtml.module("vhtml"));
     exe_unit_tests.root_module.addImport("sqlite", sqlite.module("sqlite"));
     exe_unit_tests.root_module.addImport("httpz", httpz.module("httpz"));
+    exe_unit_tests.bundle_ubsan_rt = true;
     exe_unit_tests.linkLibrary(sqlite.artifact("sqlite"));
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     build_steps.@"test".dependOn(&run_exe_unit_tests.step);
@@ -106,6 +108,7 @@ pub fn build(b: *std.Build) void {
     exe_check.root_module.addImport("lucide", lucide.module("lucide"));
     exe_check.root_module.addImport("bulma", bulma.module("bulma"));
     exe_check.root_module.addImport("htmx", htmx.module("htmx"));
+    exe_check.bundle_ubsan_rt = true;
     exe_check.linkLibrary(sqlite.artifact("sqlite"));
     build_steps.check.dependOn(&exe_check.step);
 

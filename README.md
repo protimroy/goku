@@ -24,14 +24,14 @@ Today, Goku ships with a practical core for documentation sites, blogs, and rese
 
 ## Requirements
 
-- Officially supported Zig: `0.14.0` (you can get it from the [Zig Releases page](https://ziglang.org/download/))
+- Officially supported Zig: `0.15.0-dev.885+e83776595` (you can get it from the [Zig Releases page](https://ziglang.org/download/))
 
 ## Installation
 
 Use Zig to build the application binary. With a shell open in this project's directory:
 
 ```
-/home/protim/Documents/zig-linux-x86_64-0.14.0/zig build -Doptimize=ReleaseSafe
+/home/protim/Documents/zig-x86_64-linux-0.15.0-dev.885+e83776595/zig build -Doptimize=ReleaseSafe
 ```
 
 The goku binary will be available at `zig-out/bin/goku`.
